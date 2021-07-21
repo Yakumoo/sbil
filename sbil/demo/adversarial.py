@@ -4,7 +4,6 @@ from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
 from stable_baselines3.common.buffers import DictReplayBuffer, ReplayBuffer, RolloutBuffer, DictRolloutBuffer
 from stable_baselines3.common.preprocessing import get_action_dim
-from stable_baselines3.common.vec_env import VecNormalize
 from stable_baselines3.common.type_aliases import (
     DictReplayBufferSamples,
     DictRolloutBufferSamples,
@@ -12,16 +11,17 @@ from stable_baselines3.common.type_aliases import (
     RolloutBufferSamples,
 )
 from sbil.demo.utils import get_demo_buffer, state_action, all_state_action
-from sbil.utils import set_method, MLP, set_restore, save
+from sbil.utils import set_method, MLP, set_restore, save, get_policy
 import sbil
 
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 from pathlib import Path
 from types import MethodType
 from operator import attrgetter
+from functools import partial
+
 import torch as th
 from torch.nn.functional import logsigmoid, mse_loss
-from functools import partial
 import numpy as np
 import gym
 
@@ -29,19 +29,18 @@ import gym
 
 def discriminator_step(discriminator, buffer_sample, demo_buffer, learner, state_only, λ=1, center=1):
     batch_size = buffer_sample.actions.shape[0]
-    f = attrgetter(("policy" if isinstance(learner, OnPolicyAlgorithm) else "actor") + ".extract_features")
-    f = f(learner) # features_extrators
-    with th.no_grad():
-        demo_sample = demo_buffer.sample(batch_size, learner._vec_normalize_env)
-        demo_sa = f(demo_sample.observations)
-        exp_sa = f(buffer_sample.observations)
-        if not state_only:
-            exp_sa = th.hstack((exp_sa, buffer_sample.actions))
-            demo_sa = th.hstack((demo_sa, demo_sample.actions))
-        α = th.rand(batch_size,1).to(learner.device)
+    extract_features = get_policy(learner).extract_features
+    demo_sample = demo_buffer.sample(batch_size, learner._vec_normalize_env)
+    # get state-action pairs
+    obs = extract_features(buffer_sample.observations)
+    sa = state_action(obs, buffer_sample.actions, state_only, numpy=False)
+    demo_obs = extract_features(demo_sample.observations)
+    demo_sa = state_action(obs, demo_sample.actions, state_only, numpy=False)
+    
+    α = th.rand(batch_size,1).to(learner.device)
     with th.autograd.set_detect_anomaly(True):
         # regularization: zero-centered gradient penalty: https://openreview.net/pdf?id=ByxPYjC5KQ
-        inputs = th.autograd.Variable(exp_sa*α + (1-α)*demo_sa, requires_grad=True).to(learner.device)
+        inputs = th.autograd.Variable(sa*α + (1-α)*demo_sa, requires_grad=True).to(learner.device)
         outputs = discriminator(inputs)
         gradients = th.autograd.grad(
             outputs=outputs,
@@ -53,13 +52,13 @@ def discriminator_step(discriminator, buffer_sample, demo_buffer, learner, state
         )[0]
         penalty = λ * th.square(th.linalg.norm(gradients)-center)
         # discrimination loss
-        loss = -logsigmoid(-discriminator(exp_sa)) - logsigmoid(discriminator(demo_sa))
+        loss = -logsigmoid(-discriminator(sa)) - logsigmoid(discriminator(demo_sa))
         loss = loss.mean() + penalty.mean()
         discriminator.optimizer.zero_grad()
         loss.backward()
         discriminator.optimizer.step()
     return loss.item()
-    
+
 
 def train_off(self, gradient_steps, super_, discriminator, demo_buffer, state_only: bool = False, *args, **kwargs) -> None:
     for gradient_step in range(gradient_steps):
@@ -72,7 +71,7 @@ def train_on(self, super_, discriminator, demo_buffer, state_only: bool = False,
         for rollout_data in self.rollout_buffer.get(self.batch_size):
             discriminator_step(discriminator, rollout_data, demo_buffer, self, state_only)
     super_(*args, **kwargs)
-        
+
 def sample(self, batch_size, env, *args, super_, discriminator, extract_features, state_only: bool = False, **kwargs) -> Union[DictReplayBufferSamples, ReplayBufferSamples]:
     with th.no_grad():
         replay_data = super_(batch_size=batch_size, env=env, *args, **kwargs)
@@ -80,7 +79,7 @@ def sample(self, batch_size, env, *args, super_, discriminator, extract_features
         sa = state_action(state, replay_data.actions, state_only, numpy=False)
         out = discriminator(sa)
         replay_data.rewards[:] = logsigmoid(out) - logsigmoid(-out)
-     
+
     return replay_data
 
 def compute_returns_and_advantage(self, super_, discriminator, extract_features, state_only: bool = False, *args, **kwargs) -> None:
@@ -90,28 +89,6 @@ def compute_returns_and_advantage(self, super_, discriminator, extract_features,
     self.rewards[:] = rewards.view(self.buffer_size, self.n_envs).detach().numpy() # unstack
     super_(*args, **kwargs)
 
-"""
-def make_discriminator(learner):
-    f = attrgetter(("policy" if isinstance(learner, OnPolicyAlgorithm) else "actor") + ".features_extractor.features_dim")
-    return  MLP(
-        input_dim=f(learner) + (0 if learner.state_only else get_action_dim(learner.action_space)),
-        output_dim=1,
-        net_arch=learner.net_arch,
-        spectral_norm=True,
-    ).to(learner.device)
-
-def _setup_model(self, super_):
-    super_()
-    self.discriminator = make_discriminator(self)
-
-def _excluded_save_params(self, super_) -> List[str]:
-    return super_() + ["discriminator"]
-
-def _get_torch_save_params(self, super_) -> Tuple[List[str], List[str]]:
-    state_dicts, others = super_()
-    state_dicts += ["discriminator", "discriminator.optimizer"]
-    return state_dicts, others
-"""
 def adversarial(
     learner: Union[OnPolicyAlgorithm, OffPolicyAlgorithm],
     demo_buffer: Union[DictReplayBuffer, ReplayBuffer, str, Path],
@@ -125,7 +102,7 @@ def adversarial(
     The reward is modified in:
     - learner.replay_buffer._get_samples if OffPolicyAlgorithm
     - learner.rollout_buffer.compute_returns_and_advantage if OnPolicyAlgorithm
-    
+
     :param learner: Stable baselines learner object
     :param demo_buffer: Demonstration replay buffer
     :param state_only: Use state only
@@ -137,17 +114,17 @@ def adversarial(
     demo_buffer = get_demo_buffer(demo_buffer, learner)
     is_off = isinstance(learner, OffPolicyAlgorithm)
     is_on = not is_off
-    
+
     buffer_name = "replay_buffer" if is_off else "rollout_buffer"
     set_restore(getattr(learner, buffer_name))
     set_restore(learner, lambda self: getattr(self, buffer_name).restore())
 
-    
+
     # discriminator
     if load is None:
         learner.state_only = state_only
         learner.net_arch = net_arch
-    p = getattr(learner, "actor" if is_off else "policy")
+    p = get_policy(learner)
     input_dim = p.features_extractor.features_dim
     if not learner.state_only:
         input_dim += get_action_dim(learner.action_space)
@@ -161,6 +138,7 @@ def adversarial(
     if load is not None:
         load(path, modules=modules)
     set_method(learner, old="save", new=partial(save, modules=modules))
+
     # modify train() to train the discriminator
     set_method(
         learner,
@@ -170,8 +148,6 @@ def adversarial(
         demo_buffer=demo_buffer,
         state_only=state_only,
     )
-    #set_method(learner, old="_get_torch_save_params", new=_get_torch_save_params)
-    #set_method(learner, old="_excluded_save_params", new=_excluded_save_params)
 
     # overwrite set_method with additional arguments
     set_method_ = partial(
@@ -189,4 +165,3 @@ def adversarial(
     else:
         raise NotImplementedError()
     return learner
-

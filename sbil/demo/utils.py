@@ -34,13 +34,13 @@ class AbsorbingState(gym.ObservationWrapper):
             )
         else:
             raise NotImplementedError()
-    
+
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         observation, reward, done, info = self.env.step(action)
         # indicate absorb: end of episode and no timeout
         self.absorb = done and not info.get('TimeLimit.truncated', False)
         return self.observation(observation), reward, done, info
-    
+
     def observation(self, observation):
         return np.hstack((observation, self.absorb))
 
@@ -53,7 +53,7 @@ class AbsorbingState(gym.ObservationWrapper):
 
 def replay_buffer_with_absorbing(replay_buffer: ReplayBuffer) -> ReplayBuffer:
     if isinstance(replay_buffer.observation_space, Box) and len((replay_buffer.observation_space.shape))==1:
-        
+
         o = replay_buffer.observation_space
         assert len(o.shape) == 1, "For Box spaces, 1D spaces are only supported"
         o.high = np.hstack((o.high, 1))
@@ -71,32 +71,7 @@ def replay_buffer_with_absorbing(replay_buffer: ReplayBuffer) -> ReplayBuffer:
     else:
         raise NotImplementedError()
     return b
-    """
-    observation_space = Box(
-            low=np.hstack((replay_buffer.observation_space.low,-1)),
-            high=np.hstack((replay_buffer.observation_space.high,1)),
-            dtype=replay_buffer.observation_space.dtype,
-        )
-    new_replay_buffer = ReplayBuffer(
-        buffer_size=replay_buffer.buffer_size,
-        observation_space=observation_space,
-        action_space=replay_buffer.action_space,
-        optimize_memory_usage=replay_buffer.optimize_memory_usage)
-    for i in range(replay_buffer.size()-1):
-        new_replay_buffer.add(
-            obs=np.hstack((replay_buffer.observations[i], replay_buffer.dones[i][None])),
-            next_obs=np.hstack((
-                replay_buffer.observations[i+1]  if replay_buffer.optimize_memory_usage
-                else replay_buffer.next_observations[i], replay_buffer.dones[i+1][None]
-            )),
-            action=replay_buffer.actions[i],
-            reward=replay_buffer.rewards[i],
-            done=replay_buffer.dones[i],
-            infos=[{}],
-        )
-    
-    return new_replay_buffer
-    """
+
 
 def get_demo_buffer(demo_buffer, learner):
     if isinstance(demo_buffer, (str, Path)):
@@ -114,11 +89,11 @@ def state_action(state, action, state_only=False, numpy=True):
     return np.concatenate(sa, axis=-1) if numpy else th.cat(sa, dim=-1)
 
 def all_state_action(buffer, extract_features, state_only):
-    view = buffer.buffer_size*buffer.n_envs, -1
+    t = lambda x: buffer.to_torch(x).view(buffer.buffer_size*buffer.n_envs, -1)
     if isinstance(buffer.observations, dict):
-        observations = {key: buffer.to_torch(obs).view(*view) for (key, obs) in buffer.observations.items()} # OrderedDict?
+        observations = {k: t(v) for (k, v) in buffer.observations.items()} # OrderedDict?
     else:
-        observations = buffer.to_torch(buffer.observations).view(*view)
+        observations = t(buffer.observations)
     observations = extract_features(observations)
-    actions = buffer.to_torch(buffer.actions).view(*view)
+    actions = t(buffer.actions)
     return state_action(observations, actions, state_only, numpy=False)
