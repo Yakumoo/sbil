@@ -36,5 +36,5 @@ learn:
     total_timesteps: 10000
 ```
 ```shell
-python -m still.learn -c path/my_config.yaml
+python -m sbil.learn -c path/my_config.yaml
 ```
