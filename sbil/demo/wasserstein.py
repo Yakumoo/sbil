@@ -8,7 +8,7 @@ from stable_baselines3.her.her_replay_buffer import get_time_limit
 from stable_baselines3.common.preprocessing import get_action_dim
 
 from sbil.demo.utils import get_demo_buffer, state_action, all_state_action
-from sbil.utils import set_method, MLP, set_restore, save
+from sbil.utils import set_method, MLP, set_restore, save, _excluded_save_params
 import sbil
 
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
@@ -121,9 +121,6 @@ def _store_transition(
     if self._vec_normalize_env is not None:
         self._last_original_obs = new_obs_
 
-def _excluded_save_params(self, super_):
-    # exlude the pool as they might take a lot of space during saving
-    return super_()+["pool_sa", "pool_w"]
 
 def pwil(
     learner: OffPolicyAlgorithm,
@@ -193,6 +190,7 @@ def pwil(
         learner,
         old="_excluded_save_params",
         new=_excluded_save_params,
+        additionals=["pool_sa", "pool_w"] # They are useless
     )
 
     return learner

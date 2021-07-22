@@ -6,7 +6,7 @@ import importlib
 import gym
 from functools import partial
 import os
-from inspect import signature
+from inspect import signature, ismethod
 import sys
 import ast
 from operator import attrgetter
@@ -18,6 +18,7 @@ from sbil.utils import safe_eval, make_config, make_env, make_learner, ok, EvalS
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize, DummyVecEnv
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
+from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 
 # for multiprocessing, the import must be in the global scope
 config, gym_import = make_config()
@@ -28,7 +29,7 @@ def main():
     # unpack
     config_env = config['env']
     config_learner = config['learner']
-    config_algorithm = config.get('algorithm', None)
+    config_algo = config.get('algorithm', None)
     config_learn = config.get('learn', None)
     config_declare = config.get('declare', None)
     config_save = config.get('save', None)
@@ -40,21 +41,22 @@ def main():
             print(f"Executing {config_declare}, use codes that you trust!")
             with open(config_declare) as f: # https://stackoverflow.com/a/437857
                 code = compile(f.read(), config_declare, 'exec')
-                exec(code, {}, {}) # safe ?
+                exec(code, {}, {}) # allow import, safe ?
         else:
             print("Evaluating declare")
-            safe_eval(config_declare)
+            safe_eval(config_declare) # import forbidden
     m = sys.modules[__name__]
 
     # gym environment wrappers
     env = make_env(config_env)
     # learner
-    learner = make_learner(config_learner, env, config_algorithm)
+    learner = make_learner(config_learner, env, config_algo)
     print(
-        f"Using {type(learner).__name__}"
-        +(f" and {config_algorithm['algorithm']}" if config_algorithm and 'algorithm' in config_algorithm else "")
+        f"Using {type(learner).__name__}" + (f" and {config_algo['algo']}"
+        if config_algo and 'algo' in config_algo else "")
         +f" on {config_env['id']}"
     )
+    is_off = isinstance(learner, OffPolicyAlgorithm)
 
     if config_learn is not None and ok(config_learn):
         # callback
@@ -73,11 +75,13 @@ def main():
         learner.learn(**config_learn)
 
     if config_save is not None and ok(config_save):
-        if config_save.get('learner',None) is not None:
-            model.save(config_save['learner'])
-        if config_save.get('policy',None) is not None:
-            model.policy.save(config_save['policy'])
-        if config_save.get('env',None) is not None:# and hasattr(env, "save"):
+        if config_save.get('learner', None) is not None:
+            learner.save(config_save['learner'])
+        if config_save.get('policy', None) is not None:
+            learner.policy.save(config_save['policy'])
+        if config_save.get('buffer', None) is not None and is_off:
+            learner.save_replay_buffer(config_save['buffer'])
+        if config_save.get('env', None) is not None and hasattr(env, "save"):
             env.save(config_save['env'])
 
 

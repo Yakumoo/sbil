@@ -36,7 +36,7 @@ def discriminator_step(discriminator, buffer_sample, demo_buffer, learner, state
     sa = state_action(obs, buffer_sample.actions, state_only, numpy=False)
     demo_obs = extract_features(demo_sample.observations)
     demo_sa = state_action(obs, demo_sample.actions, state_only, numpy=False)
-    
+
     α = th.rand(batch_size,1).to(learner.device)
     with th.autograd.set_detect_anomaly(True):
         # regularization: zero-centered gradient penalty: https://openreview.net/pdf?id=ByxPYjC5KQ
@@ -52,7 +52,7 @@ def discriminator_step(discriminator, buffer_sample, demo_buffer, learner, state
         )[0]
         penalty = λ * th.square(th.linalg.norm(gradients)-center)
         # discrimination loss
-        loss = -logsigmoid(-discriminator(sa)) - logsigmoid(discriminator(demo_sa))
+        loss = logsigmoid(discriminator(sa)) + logsigmoid(-discriminator(demo_sa))
         loss = loss.mean() + penalty.mean()
         discriminator.optimizer.zero_grad()
         loss.backward()
