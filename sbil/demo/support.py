@@ -6,7 +6,7 @@ from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
 from stable_baselines3.common.buffers import (
     DictReplayBuffer, ReplayBuffer, RolloutBuffer, DictRolloutBuffer
 )
-from stable_baselines3.common.preprocessing import get_action_dim
+from stable_baselines3.common.preprocessing import get_action_dim, get_flattened_obs_dim
 from stable_baselines3.common.type_aliases import (
     DictReplayBufferSamples,
     DictRolloutBufferSamples,
@@ -16,7 +16,7 @@ from stable_baselines3.common.type_aliases import (
 from stable_baselines3.common.torch_layers import create_mlp
 
 from sbil.demo.utils import get_demo_buffer, state_action, all_state_action
-from sbil.utils import set_method, MLP, set_restore, save, get_policy
+from sbil.utils import set_method, MLP, set_restore, save, get_policy, get_features_extractor
 import sbil
 
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
@@ -31,16 +31,15 @@ import numpy as np
 import gym
 
 
-def sample(self, batch_size, env, *args, super_, rnd, extract_features, state_only: bool = False, **kwargs) -> Union[DictReplayBufferSamples, ReplayBufferSamples]:
+def sample(self, batch_size, env, *args, super_, rnd, learner, state_only: bool = False, **kwargs) -> Union[DictReplayBufferSamples, ReplayBufferSamples]:
     replay_data = super_(batch_size=batch_size, env=env, *args, **kwargs)
-    obs = extract_features(replay_data.observations)
-    sa = state_action(obs, replay_data.actions, state_only, numpy=False)
+    sa = state_action(replay_data.observations, replay_data.actions, learner, state_only)
     rewards = rnd(sa).mean(-1).view(batch_size, self.n_envs)
     replay_data.rewards[:] = th.exp(-rewards)
     return replay_data
 
-def compute_returns_and_advantage(self, super_, rnd, extract_features, state_only: bool = False, *args, **kwargs) -> None:
-    sa = all_state_action(self, extract_features, state_only)
+def compute_returns_and_advantage(self, super_, rnd, learner, state_only: bool = False, *args, **kwargs) -> None:
+    sa = all_state_action(self, learner, state_only)
     rewards = rnd(sa).mean(-1).view(self.buffer_size, self.n_envs)
     rewards = rewards.detach().numpy()
     self.rewards[:] = np.exp(-rewards)
@@ -89,11 +88,11 @@ def red(
     if load is None:
         learner.state_only = state_only
         learner.net_arch = net_arch
-    #print(learner.policy.features_extractor)
-    p = get_policy(learner)#getattr(learner, "actor" if is_off else "policy")
+
+    p = get_features_extractor(learner)
     input_dim = p.features_extractor.features_dim
     if not learner.state_only:
-        input_dim += get_action_dim(learner.action_space)
+        input_dim += get_flattened_obs_dim(learner.action_space)
     rnd = MLP(
         input_dim=input_dim,
         output_dim=learner.net_arch['latent'],
@@ -118,7 +117,7 @@ def red(
         set_method,
         rnd=rnd,
         state_only=state_only,
-        extract_features=p.extract_features
+        learner=learner,
     )
 
     # modify the buffer to change the reward
@@ -130,10 +129,11 @@ def red(
         raise NotImplementedError()
 
     # train rnd
+    batch_size = learner.batch_size if hasattr(learner, "batch_size") else learner.n_steps*learner.env.num_envs
     for i in range(gradient_steps):
-        demo_sample = demo_buffer.sample(learner.batch_size, env=learner._vec_normalize_env)
-        obs = p.extract_features(demo_sample.observations)
-        sa = state_action(obs, demo_sample.actions, state_only, numpy=False)
+        demo_sample = demo_buffer.sample(batch_size, env=learner._vec_normalize_env)
+
+        sa = state_action(demo_sample.observations, demo_sample.actions, learner, state_only)
         loss = rnd(sa).mean()
         rnd.optimizer.zero_grad()
         loss.backward()

@@ -5,10 +5,10 @@ from stable_baselines3.common.buffers import (
     DictReplayBuffer, ReplayBuffer, RolloutBuffer, DictRolloutBuffer
 )
 from stable_baselines3.her.her_replay_buffer import get_time_limit
-from stable_baselines3.common.preprocessing import get_action_dim
+from stable_baselines3.common.preprocessing import get_action_dim, preprocess_obs
 
 from sbil.demo.utils import get_demo_buffer, state_action, all_state_action
-from sbil.utils import set_method, MLP, set_restore, save, _excluded_save_params
+from sbil.utils import set_method, MLP, set_restore, save, _excluded_save_params, get_features_extractor
 import sbil
 
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
@@ -50,6 +50,16 @@ def _store_transition(
     :param infos: List of additional information about the transition.
         It may contain the terminal observations and information about timeout.
     """
+    if self.n > T: # overflow
+        self.n += 1
+        if self.n == T:
+            print("episode time step more than expected.")
+        if done: # re-initialize back to the original
+            print("Episode done with overflow:", self.n)
+            self.pool_sa = np.array(demo_sa)
+            s = len(self.pool_sa)
+            self.pool_w = np.ones(s) / s + 1e-6; self.n = 0
+        return
     # Store only the unnormalized version
     if self._vec_normalize_env is not None:
         new_obs_ = self._vec_normalize_env.get_original_obs()
@@ -62,8 +72,7 @@ def _store_transition(
     t = lambda x: self.replay_buffer.to_torch(x)
     obs = self._last_original_obs
     obs = {k: t(v) for k,v in obs.items()} if isinstance(obs, dict) else t(obs)
-    obs = self.actor.extract_features(obs).detach().numpy()
-    sa = state_action(obs, buffer_action, state_only, numpy=True)
+    sa = state_action(obs, t(buffer_action), self, state_only)
     sa = scaler.transform(sa)[0] # standardized state-action
 
     # upper bound wasserstein distance greedy coupling
@@ -76,14 +85,15 @@ def _store_transition(
         j = argsort[i]
         demo_weight = self.pool_w[j]
         demo_dist = norm[j]
-        if weight > demo_weight:
+        if weight >= demo_weight:
             cost += demo_weight * demo_dist
             weight -= demo_weight
+            i += 1
         else:
             cost += weight * demo_dist
             self.pool_w[j] -= weight
             weight = 0
-        i += 1
+
 
     # delete visited
     to_delete = argsort[np.arange(i)]
@@ -91,11 +101,11 @@ def _store_transition(
     self.pool_w = np.delete(self.pool_w, to_delete, axis=0)
 
     reward_ = self.α * np.exp(-self.σ * cost)
-
+    self.n += 1#; print(self.n, len(self.pool_w), i)
     if done: # re-initialize back to the original
         self.pool_sa = np.array(demo_sa)
         s = len(self.pool_sa)
-        self.pool_w = np.ones(s) / s
+        self.pool_w = np.ones(s) / s + 1e-6; self.n = 0
 
     # As the VecEnv resets automatically, new_obs is already the
     # first observation of the next episode
@@ -146,10 +156,12 @@ def pwil(
     :param α,β: reward scaler hyperparameters
     :return leaner: Decorated learner
     """
+    assert learner.env.num_envs == 1, "pwil only support a single environment."
     T = get_time_limit(learner.env, None) # get time limit or raise
 
     set_restore(learner)
     demo_buffer = get_demo_buffer(demo_buffer, learner)
+    p = get_features_extractor(learner)
 
     # get state-action pair from the demo_buffer
     s = demo_buffer.size()
@@ -159,23 +171,27 @@ def pwil(
         demo_obs = {k:t(v[:s]) for k, v in demo_obs.items()}
     else:
         demo_obs = t(demo_obs[:s])
-    demo_sa = learner.actor.extract_features(demo_obs).detach().numpy()
-    demo_act = demo_buffer.actions[:s].reshape(s, -1)
+    demo_sa = state_action(demo_obs, t(demo_buffer.actions[:s]), learner, state_only).numpy()
+    """
+    demo_sa = p.extract_features(demo_obs).detach().numpy()
     if not state_only:
+        demo_act = t(demo_buffer.actions[:s])
+        demo_act = preprocess_obs(demo_act, learner.action_space).detach().numpy()
         demo_sa = np.concatenate((demo_sa, demo_act), axis=-1)
+    """
     scaler = StandardScaler()
     demo_sa = scaler.fit_transform(demo_sa) # stadardize
 
     learner.pool_sa = np.array(demo_sa) # demo pool state-action
-    learner.pool_w = np.ones(s) / s # demo pool weights
+    learner.pool_w = np.ones(s) / s + 1e-6 # demo pool weights
 
     # precompute reward scale
     learner.α = α
-    σ = learner.actor.features_extractor.features_dim
+    σ = p.features_extractor.features_dim
     if not state_only:
         σ += get_action_dim(learner.action_space)
     σ = β * T / np.sqrt(σ)
-    learner.σ = σ.item()
+    learner.σ = σ.item(); learner.n = 0
 
     set_method(
         learner,
@@ -190,7 +206,7 @@ def pwil(
         learner,
         old="_excluded_save_params",
         new=_excluded_save_params,
-        additionals=["pool_sa", "pool_w"] # They are useless
+        additionals=["pool_sa", "pool_w", "n"] # They are useless
     )
 
     return learner

@@ -12,7 +12,7 @@ import functools
 import inspect
 from zipfile import ZipFile
 from operator import attrgetter
-
+import shutil
 
 
 import gym
@@ -20,6 +20,7 @@ from gym.spaces import Box
 import pandas as pd
 import numpy as np
 import torch as th
+from torch.nn import functional as F
 import stable_baselines3 as sb
 import sklearn as sk
 import matplotlib.pyplot as plt
@@ -59,10 +60,20 @@ from stable_baselines3.common.logger import Logger, CSVOutputFormat, configure, 
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.policies import BasePolicy
 from stable_baselines3.common.type_aliases import GymEnv
+from stable_baselines3.common.utils import polyak_update
+from stable_baselines3 import SAC, TD3, DQN
+
+try:
+    from sb3_contrib import TQC, QRDQN
+    from sb3_contrib.common.utils import quantile_huber_loss
+except ImportError:
+    TQC, QRDQN = None, None
 
 from sbil.data.generate_demo import generate_demo
 import sbil
 
+OnOrOff = Union[OffPolicyAlgorithm, OnPolicyAlgorithm]
+Info = Dict[str, Any]
 
 def safe_eval(s:str) -> None:
     """ Excecute a string code using a whitelist. """
@@ -130,7 +141,7 @@ class MLP(th.nn.Module):
         net_arch: List[int] = [32,32],
         output_transform: Optional[Union[str, Callable[[], th.nn.Module]]] = None,
         spectral_norm: bool = False,
-        optimizer: Dict[str, Any] = {'class':th.optim.Adam},
+        optimizer: Dict[str, Any] = {},
     ) -> None:
         super(MLP, self).__init__()
 
@@ -171,7 +182,7 @@ class MLP(th.nn.Module):
             layers += [getattr(th.nn, ot)() if isinstance(ot, str) else ot()]
         self.mlp = th.nn.Sequential(*layers)
         optimizer['lr'] = optimizer.get('lr', 5e-4)
-        optimizer_class = optimizer.pop('class')
+        optimizer_class = optimizer.pop('class', th.optim.Adam)
         self.optimizer = optimizer_class(self.mlp.parameters(), **optimizer)
 
 
@@ -189,13 +200,23 @@ class MLP(th.nn.Module):
 class EvalSaveGif(EvalCallback):
     """
     Evaluate the learner, save a gif and the learner of the last evaluation (overwrite).
+    Gather all logs in the same folder.
     The logger is reconfigured to output csv as well.
+    The a copy of the config file can be copied.
     """
-    def __init__(self, eval_env, *args, period: int = 1, mode='rgb_array', **kwargs):
+    def __init__(self,
+        eval_env,
+        *args,
+        period: int = 1,
+        mode='rgb_array',
+        config_path: Optional[Dict[str, str]]= None,
+        **kwargs,
+    ):
         super(EvalSaveGif, self).__init__(eval_env=eval_env, *args, **kwargs)
         self.count = 0
         self.mode = mode
         self.period = period
+        self.config_path = config_path
 
     def _on_training_start(self): # setup the csv logger
         self.dir = self.logger.get_dir() or self.log_path
@@ -208,6 +229,8 @@ class EvalSaveGif(EvalCallback):
         )
         self.model.set_logger(logger) # set logger to the model
         self.logger = logger # set logger to the callback
+        if self.config_path is not None:
+            shutil.copyfile(self.config_path, self.dir + "/config.yaml")
 
     def _log_success_callback(self, locals_, globals_) -> None:
         super()._log_success_callback(locals_, globals_)
@@ -220,7 +243,7 @@ class EvalSaveGif(EvalCallback):
             self.count = 0
             self.images = []
             out = super()._on_step()
-            fps = self.model.env.metadata.get('video.frames_per_second', 30) / self.period
+            fps = self.model.env.get_attr("metadata")[0].get('video.frames_per_second', 30) / self.period
             imageio.mimsave(self.dir+"/eval.gif", self.images, fps=fps)
             self.model.save(self.dir+"/last_model.zip")
             return out
@@ -241,7 +264,7 @@ def set_method(x, old:str, new: Callable[..., Any], **kwargs):
     old_method = getattr(x, old)
     kwargs["super_"] = old_method
     setattr(x, old, MethodType(partial(new, **kwargs), x))
-    if isinstance(x, BaseAlgorithm):
+    if isinstance(x, BaseAlgorithm) and old not in x._excluded_save_params():
         # exclude the method for saving
         old_exclude = x._excluded_save_params
         x._excluded_save_params = MethodType(
@@ -371,26 +394,27 @@ def make_config() -> Tuple[Dict[str, Any], Any]:
 
     # import gym environment
     if config['env'].get('import', None) is not None:
-        gym_import = importlib.import_module(config['env'].pop('import'))
+        gym_import = importlib.import_module(config['env'].get('import'))
     else:
         gym_import = None
 
-    return config, gym_import
+    return config, args.config, gym_import
 
 def make_env(config_env: Dict[str, str]) -> GymEnv:
-    config_env = {k.lower().strip(): v for k, v in config_env.items()}
+    config_env_ = {k.lower().strip(): v for k, v in config_env.copy().items()}
+    config_env_.pop('import', None)
     # gym environment wrappers
-    max_steps = config_env.pop('max_episode_steps', None)
-    absorb = config_env.pop('absorbingstate', None)
-    normalize = config_env.pop('normalize', None)
-    vecenv = config_env.pop('vecenv', None)
-    n_envs = config_env.pop('n_envs', None)
+    max_steps = config_env_.pop('max_episode_steps', None)
+    absorb = config_env_.pop('absorbingstate', None)
+    normalize = config_env_.pop('normalize', None)
+    vecenv = config_env_.pop('vecenv', None)
+    n_envs = config_env_.pop('n_envs', None)
     if n_envs is None:
         n_envs = 1
     elif n_envs < 0:
         n_envs = os.cpu_count()
 
-    if config_env.pop('timelimitaware', None):
+    if config_env_.pop('timelimitaware', None):
         time_wrap = TimeLimitAware
     else:
         time_wrap = gym.wrappers.TimeLimit
@@ -400,7 +424,7 @@ def make_env(config_env: Dict[str, str]) -> GymEnv:
         lambda env_: time_wrap(env_, max_episode_steps=max_steps): max_steps,
     }
     def make_env_():
-        env_ = gym.make(**config_env)
+        env_ = gym.make(**config_env_)
         for key, value in wrappers.items():
             if value:
                 env_ = key(env_)
@@ -422,13 +446,14 @@ def make_learner(
     config_algorithm: Dict[str, str]=None
 ) -> BaseAlgorithm:
     learner_class_name = config_learner.pop('class')
+    learner_class = None
     if hasattr(sb, learner_class_name):
         learner_class = getattr(sb, learner_class_name)
     elif importlib.util.find_spec("sb3_contrib"):
         import sb3_contrib
         if hasattr(sb3_contrib, learner_class_name):
             learner_class = getattr(sb3_contrib, learner_class_name)
-    else:
+    if learner_class is None:
         learner_class = get_class(learner_class_name)
         assert learner_class is not None, (
             f"Learner class names ({learner_class_name}) are not matching"
@@ -446,9 +471,8 @@ def make_learner(
         if p[key].annotation in {float, int}:
             value = p[key].annotation(value)
     # Instanciate learner
-    config_learner['env'] = env
     if load is None:
-        learner = learner_class(**config_learner)
+        learner = learner_class(**config_learner, env=env)
         if policy_load:
             learner.policy = learner.policy.load(policy_load)
     else:
@@ -477,8 +501,14 @@ def make_learner(
     return learner
 
 def get_policy(learner: BaseAlgorithm) -> BasePolicy:
+    if hasattr(learner, "actor") and learner.actor is not None:
+        return learner.actor
+    else:
+        return learner.policy
+
+def get_features_extractor(learner: BaseAlgorithm) -> BasePolicy:
     """
-    Get policy from learner. The returned policy has the extract_features() method.
+    Return the object having the extract_features() and _predict method.
     """
     if isinstance(learner, OnPolicyAlgorithm): # PPO, A2C
         return learner.policy
@@ -490,3 +520,310 @@ def get_policy(learner: BaseAlgorithm) -> BasePolicy:
     # double network
     else: # SAC, TQC, TD3, DDPG
         return learner.actor
+
+def action_loss(policy: BasePolicy, observations: th.Tensor, actions: th.Tensor) -> th.Tensor:
+    """
+    Return the action loss given the observations as the input and and the
+    actions as the target. The loss is:
+    - mse_loss if the policy is deterministic like TD3
+    - cross_entropy if the policy is the Q value, like DQN
+    - log_prob otherwise, like SAC or PPO
+    The returned loss is not reduced with size (-1,1)
+
+    :param policy: policy obtained with get_policy()
+    :param observations: observations to pass to the policy
+    :param actions: Target action scaled to [-1, 1] if continuous (ReplayBuffer)
+    """
+    q_net = getattr(policy, "q_net", getattr(policy, "quantile_net", None))
+
+    if hasattr(policy, "evaluate_actions"): # PPO
+        value, log_prob, entropy = policy.evaluate_actions(observations, actions)
+        loss = -log_prob
+    # actor
+    elif hasattr(policy, "action_dist"): # SAC, TQC
+        # first pass observations to set the distribution
+        policy(observations)
+        loss = -policy.action_dist.log_prob(actions)
+    elif hasattr(policy, "mu"): # TD3
+        loss = F.mse_loss(input=policy(observations), target=actions, reduction='none')
+    # Q value policy
+    elif q_net is not None: # DQN, QRDQN
+        input = q_net(observations)
+        if hasattr(policy, "quantile_net"):
+            input = input.mean(1)
+        loss = F.cross_entropy(input=input, target=actions.squeeze(), reduction='none')
+    return loss.view(-1, 1)
+
+def add_metric(x, y=None) -> None:
+    if y is None: return
+    for k, v in y.items():
+        x[k] = (x[k] + [v]) if k in x else [v]
+
+def update_learning_rate(self):
+    if hasattr(self, "q_net") or hasattr(self, "quantile_net"):
+        optimizers = [self.policy.optimizer]
+    else:
+        optimizers = [self.actor.optimizer, self.critic.optimizer]
+        if getattr(self, "ent_coef_optimizer", None) is not None:
+            optimizers += [self.ent_coef_optimizer]
+    self._update_learning_rate(optimizers)
+
+def entropy(self, data):
+    if hasattr(self, "ent_coef_optimizer"):
+        # Action by the current actor for the sampled state
+        actions_pi, log_prob = self.actor.action_log_prob(data['replay'].observations)
+        log_prob = log_prob.reshape(-1, 1)
+
+        ent_coef_loss = None
+        if self.ent_coef_optimizer is not None:
+            # Important: detach the variable from the graph
+            # so we don't change it with other losses
+            # see https://github.com/rail-berkeley/softlearning/issues/60
+            ent_coef = th.exp(self.log_ent_coef.detach())
+            ent_coef_loss = -(self.log_ent_coef * (log_prob + self.target_entropy).detach()).mean()
+        else:
+            ent_coef = self.ent_coef_tensor
+
+        data['ent_coef'] = ent_coef
+        data['actions_pi'] = actions_pi
+        data['log_prob'] = log_prob
+
+        # Optimize entropy coefficient, also called
+        # entropy temperature or alpha in the paper
+        if ent_coef_loss is not None:
+            self.ent_coef_optimizer.zero_grad()
+            ent_coef_loss.backward()
+            self.ent_coef_optimizer.step()
+            return {'ent_coef_losses': ent_coef_loss.item(), 'ent_coef': ent_coef.item()}
+        else:
+            return {'ent_coef': ent_coef.item()}
+
+    return {}
+
+
+
+def critic_loss(self, data):
+    replay_data = data['replay']
+    if isinstance(self, SAC):
+        with th.no_grad():
+            # Select action according to policy
+            next_actions, next_log_prob = self.actor.action_log_prob(replay_data.next_observations)
+            # Compute the next Q values: min over all critics targets
+            next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
+            next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
+            # add entropy term
+            next_q_values = next_q_values - data['ent_coef'] * next_log_prob.reshape(-1, 1)
+            # td error + entropy term
+            target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
+
+        # Get current Q-values estimates for each critic network
+        # using action from the replay buffer
+        current_q_values = self.critic(replay_data.observations, replay_data.actions)
+
+        # Compute critic loss
+        critic_loss = 0.5 * sum([F.mse_loss(current_q, target_q_values) for current_q in current_q_values])
+        data['current_q_values'] = current_q_values
+
+    elif isinstance(self, TD3):
+        with th.no_grad():
+            # Select action according to policy and add clipped noise
+            noise = replay_data.actions.clone().data.normal_(0, self.target_policy_noise)
+            noise = noise.clamp(-self.target_noise_clip, self.target_noise_clip)
+            next_actions = (self.actor_target(replay_data.next_observations) + noise).clamp(-1, 1)
+
+            # Compute the next Q-values: min over all critics targets
+            next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
+            next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
+            target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
+
+        # Get current Q-values estimates for each critic network
+        current_q_values = self.critic(replay_data.observations, replay_data.actions)
+
+        # Compute critic loss
+        critic_loss = sum([F.mse_loss(current_q, target_q_values) for current_q in current_q_values])
+        data['current_q_values'] = current_q_values
+
+    elif isinstance(self, DQN):
+        with th.no_grad():
+            # Compute the next Q-values using the target network
+            next_q_values = self.q_net_target(replay_data.next_observations)
+            # Follow greedy policy: use the one with the highest value
+            next_q_values, _ = next_q_values.max(dim=1)
+            # Avoid potential broadcast issue
+            next_q_values = next_q_values.reshape(-1, 1)
+            # 1-step TD target
+            target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
+
+        # Get current Q-values estimates
+        current_q_values = self.q_net(replay_data.observations)
+        data['current_q_values_all'] = current_q_values
+        # Retrieve the q-values for the actions from the replay buffer
+        current_q_values = th.gather(current_q_values, dim=1, index=replay_data.actions.long())
+        data['current_q_values'] = current_q_values
+        # Compute Huber loss (less sensitive to outliers)
+        loss = F.smooth_l1_loss(current_q_values, target_q_values)
+
+        data['loss'] = loss
+        return {'loss': loss.item()}
+
+    elif TQC is not None and isinstance(self, TQC):
+        with th.no_grad():
+            # Select action according to policy
+            next_actions, next_log_prob = self.actor.action_log_prob(replay_data.next_observations)
+            # Compute and cut quantiles at the next state
+            # batch x nets x quantiles
+            next_quantiles = self.critic_target(replay_data.next_observations, next_actions)
+
+            # Sort and drop top k quantiles to control overestimation.
+            n_target_quantiles = self.critic.quantiles_total - self.top_quantiles_to_drop_per_net * self.critic.n_critics
+            next_quantiles, _ = th.sort(next_quantiles.reshape(data['batch_size'], -1))
+            next_quantiles = next_quantiles[:, :n_target_quantiles]
+
+            # td error + entropy term
+            target_quantiles = next_quantiles - data['ent_coef'] * next_log_prob.reshape(-1, 1)
+            target_quantiles = replay_data.rewards + (1 - replay_data.dones) * self.gamma * target_quantiles
+            # Make target_quantiles broadcastable to (batch_size, n_critics, n_target_quantiles).
+            target_quantiles.unsqueeze_(dim=1)
+
+        # Get current Quantile estimates using action from the replay buffer
+        current_quantiles = self.critic(replay_data.observations, replay_data.actions)
+        # Compute critic loss, not summing over the quantile dimension as in the paper.
+        critic_loss = quantile_huber_loss(current_quantiles, target_quantiles, sum_over_quantiles=False)
+        data['current_quantiles'] = current_quantiles
+
+    elif QRDQN is not None and isinstance(self, QRDQN):
+        with th.no_grad():
+            # Compute the quantiles of next observation
+            next_quantiles = self.quantile_net_target(replay_data.next_observations)
+            # Compute the greedy actions which maximize the next Q values
+            next_greedy_actions = next_quantiles.mean(dim=1, keepdim=True).argmax(dim=2, keepdim=True)
+            # Make "n_quantiles" copies of actions, and reshape to (batch_size, n_quantiles, 1)
+            next_greedy_actions = next_greedy_actions.expand(data['batch_size'], self.n_quantiles, 1)
+            # Follow greedy policy: use the one with the highest Q values
+            next_quantiles = next_quantiles.gather(dim=2, index=next_greedy_actions).squeeze(dim=2)
+            # 1-step TD target
+            target_quantiles = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_quantiles
+
+        # Get current quantile estimates
+        current_quantiles = self.quantile_net(replay_data.observations)
+        data['current_quantiles_all'] = current_quantiles
+        # Make "n_quantiles" copies of actions, and reshape to (batch_size, n_quantiles, 1).
+        actions = replay_data.actions[..., None].long().expand(data['batch_size'], self.n_quantiles, 1)
+        # Retrieve the quantiles for the actions from the replay buffer
+        current_quantiles = th.gather(current_quantiles, dim=2, index=actions).squeeze(dim=2)
+        data['current_quantiles'] = current_quantiles
+        # Compute Quantile Huber loss, summing over a quantile dimension as in the paper.
+        loss = quantile_huber_loss(current_quantiles, target_quantiles, sum_over_quantiles=True)
+
+        data['loss'] = loss
+        return {'loss': loss.item()}
+    else:
+        raise NotImplementedError(f"critic_loss is not supported for {type(self).__name__}.")
+
+    data['critic_loss'] = critic_loss
+    return {'critic_loss': critic_loss.item()}
+
+def optimize_critic(self, data):
+    if hasattr(self, "q_net") or hasattr(self, "quantile_net"):
+        self.policy.optimizer.zero_grad()
+        data['loss'].backward()
+        # Clip gradient norm
+        if self.max_grad_norm is not None:
+            th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+        self.policy.optimizer.step()
+    else:
+        self.critic.optimizer.zero_grad()
+        data['critic_loss'].backward()
+        self.critic.optimizer.step()
+        if (
+            (hasattr(self, "target_update_interval") and data['gradient_step'] % self.target_update_interval == 0)
+            or (hasattr(self, "policy_delay") and self._n_updates % self.policy_delay == 0)
+        ):
+            polyak_update(self.critic.parameters(), self.critic_target.parameters(), self.tau)
+
+def actor_loss(self, data):
+    replay_data = data['replay']
+    if isinstance(self, TD3):
+        qf_pi = self.critic.q1_forward(replay_data.observations, self.actor(replay_data.observations))
+        actor_loss = -qf_pi.mean()
+    elif isinstance(self, SAC):
+        q_values_pi = th.cat(self.critic.forward(replay_data.observations, data['actions_pi']), dim=1)
+        qf_pi, _ = th.min(q_values_pi, dim=1, keepdim=True)
+        actor_loss = (data['ent_coef'] * data['log_prob'] - qf_pi).mean()
+    elif TQC is not None and isinstance(self, TQC):
+        qf_pi = self.critic(replay_data.observations, data['actions_pi']).mean(dim=2).mean(dim=1, keepdim=True)
+        actor_loss = (data['ent_coef'] * data['log_prob'] - qf_pi).mean()
+    elif hasattr(self, "q_net") or hasattr(self, "quantile_net"):
+        return {}
+    else:
+        raise NotImplementedError(f"actor_loss does not support {type(self).__name__}.")
+
+    data['qf_pi'] = qf_pi
+    data['actor_loss'] = actor_loss
+    return {'actor_loss': actor_loss.item()}
+
+def optimize_actor(self, data):
+    if 'actor_loss' in data and self.actor is not None:
+        self.actor.optimizer.zero_grad()
+        data['actor_loss'].backward()
+        self.actor.optimizer.step()
+        if hasattr(self, "policy_delay") and self._n_updates % self.policy_delay == 0:
+            polyak_update(self.actor.parameters(), self.actor_target.parameters(), self.tau)
+
+def record(self, metrics, data):
+    #print(list(data.keys()))
+    if 'actor_loss' in metrics:
+        self.logger.record("train/actor_loss", np.mean(metrics['actor_loss']))
+        self.logger.record("train/critic_loss", np.mean(metrics['critic_loss']))
+    elif 'loss' in metrics:
+        self.logger.record("train/loss", np.mean(metrics['loss']))
+    if isinstance(self, SAC) or (TQC is not None and isinstance(self, TQC)):
+        self.logger.record("train/ent_coef", np.mean(metrics['ent_coef']))
+        if 'ent_coef_loss' in metrics:
+            self.logger.record("train/ent_coef_loss", np.mean(metrics['ent_coef_loss']))
+
+
+def train_off(
+    self,
+    gradient_steps: int,
+    batch_size: int = 64,
+    update_learning_rate=update_learning_rate,
+    begin: Callable[[OnOrOff, Info], Optional[Info]] = lambda learner, data: None,
+    entropy=entropy,
+    critic_loss=critic_loss,
+    optimize_critic=optimize_critic,
+    actor_loss=actor_loss,
+    optimize_actor=optimize_actor,
+    end: Callable[[OnOrOff, Info], Optional[Info]] = lambda learner, data: None,
+    super_=None,
+    *args,
+    **kwargs
+) -> None:
+
+    update_learning_rate(self)
+
+    metrics = {} # tensorboard metrics
+    data = {'batch_size': batch_size} # user data
+
+    for gradient_step in range(gradient_steps):
+        data['gradient_step'] = gradient_step
+        data['replay'] = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)
+
+        if self.use_sde:
+            self.actor.reset_noise()
+
+        add_metric(metrics, begin(self, data)) # begin setup
+
+        add_metric(metrics, entropy(self, data))
+
+        add_metric(metrics, critic_loss(self, data))
+        optimize_critic(self, data)
+
+        add_metric(metrics, actor_loss(self, data))
+        optimize_actor(self, data)
+
+        add_metric(metrics, end(self, data)) # end setup
+
+    self._n_updates += gradient_steps
+    self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
+    record(self, metrics, data)

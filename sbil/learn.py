@@ -21,13 +21,14 @@ from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
 from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 
 # for multiprocessing, the import must be in the global scope
-config, gym_import = make_config()
+config, config_path, gym_import = make_config()
 assert {"env", "learner"} <= set(config.keys()), "env and learner are required in the yaml file."
 
 
 def main():
+
     # unpack
-    config_env = config['env']
+    config_env = config['env'].copy()
     config_learner = config['learner']
     config_algo = config.get('algorithm', None)
     config_learn = config.get('learn', None)
@@ -68,11 +69,16 @@ def main():
             if callback_class is  None:
                 print("You are calling a callback that doesn't exist in learn")
                 return
-            if 'eval_env' in signature(callback_class).parameters:
+            callback_param = signature(callback_class).parameters
+            if 'eval_env' in callback_param:
                 callback_dict['eval_env'] = env
-            config_learn['callback'] = callback_class(**callback_dict)
+            if 'config_path' in callback_param:
+                callback_dict['config_path'] = config_path
+            callback = callback_class(**callback_dict)
+        else:
+            callback = None
 
-        learner.learn(**config_learn)
+        learner.learn(**config_learn, callback=callback)
 
     if config_save is not None and ok(config_save):
         if config_save.get('learner', None) is not None:

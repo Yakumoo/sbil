@@ -18,17 +18,17 @@ import gym
 
 
 
-def compute_returns_and_advantage(self, super_, demo_buffer, extract_features, state_only: bool = False, max_size=-1, σ2=None, *args, **kwargs) -> None:
+def compute_returns_and_advantage(self, super_, demo_buffer, learner, state_only: bool = False, max_size=-1, σ2=None, *args, **kwargs) -> None:
     if max_size > 1: # subsample
         #view = self.buffer_size*self.n_envs, -1
         demo_sample = demo_buffer.sample(max_size)
-        demo_sa = state_action(extract_features(demo_sample.observations), demo_sample.actions, state_only, numpy=False)
+        demo_sa = state_action(demo_sample.observations, demo_sample.actions, learner, state_only, numpy=False)
         σ2 = np.median(np.square(np.linalg.norm(demo_sa-demo_sa[:,None], axis=-1))).item()
     else: # use all, high memory consumption
         σ2 = σ2 # σ2 is precomputed
-        demo_sa = all_state_action(demo_buffer, extract_features, state_only)
-    
-    sa = all_state_action(self, extract_features, state_only)
+        demo_sa = all_state_action(demo_buffer, learner, state_only)
+
+    sa = all_state_action(self, learner, state_only)
     d1 = np.square(np.linalg.norm(sa-demo_sa[:,None], axis=-1)) # distance matrix
     σ1 = np.median(d1).item()
     σ = np.reshape([σ1, σ2], (2,1,1))
@@ -47,7 +47,7 @@ def gmmil(
     """
     GMMIL decorator: https://www-users.cs.umn.edu/~hspark/mmd.pdf
     The reward is modified in learner.rollout_buffer.compute_returns_and_advantage
-    
+
     :param learner: stable baselines learner object
     :param demo_buffer: demonstration replay buffer
     :param state_only: default is the concatenation of the state-action pair
@@ -58,12 +58,12 @@ def gmmil(
 
     demo_buffer = get_demo_buffer(demo_buffer, learner)
     set_restore(learner.rollout_buffer)
-    
+
     extract_features = learner.policy.extract_features
-    
+
     # median heuristic, σ2 is precomputed as it doesn't change if max_size<0
     if max_size < 0:
-        demo_sa = all_state_action(demo_buffer, extract_features=extract_features, state_only=state_only)
+        demo_sa = all_state_action(demo_buffer, learner, state_only=state_only)
         σ2 = np.median(np.square(np.linalg.norm(demo_sa-demo_sa[:,None], axis=-1))).item()
     else:
         σ2 = None
@@ -75,6 +75,6 @@ def gmmil(
         demo_buffer=demo_buffer,
         σ2=σ2,
         max_size=max_size,
-        extract_features=extract_features,
+        learner=learner,
     )
     return learner

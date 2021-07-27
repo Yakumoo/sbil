@@ -6,9 +6,10 @@ from pathlib import Path
 import torch as th
 import copy
 
+from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.save_util import save_to_pkl, load_from_pkl
 from stable_baselines3.common.env_util import is_wrapped
-from stable_baselines3.common.preprocessing import get_flattened_obs_dim
+from stable_baselines3.common.preprocessing import get_flattened_obs_dim, preprocess_obs
 from stable_baselines3.common.buffers import (
     DictReplayBuffer,
     ReplayBuffer,
@@ -21,6 +22,7 @@ from stable_baselines3.common.type_aliases import (
     ReplayBufferSamples,
     RolloutBufferSamples,
 )
+from sbil.utils import get_features_extractor
 
 class AbsorbingState(gym.ObservationWrapper):
     def __init__(self, env):
@@ -83,17 +85,23 @@ def get_demo_buffer(demo_buffer, learner):
     demo_buffer_.device = learner.device
     return demo_buffer_
 
-def state_action(state, action, state_only=False, numpy=True):
-    t = (lambda x: np.array(x)) if numpy else lambda x: th.as_tensor(x, dtype=th.float32)
-    sa = (t(state), () if state_only else t(action))
-    return np.concatenate(sa, axis=-1) if numpy else th.cat(sa, dim=-1)
+def state_action(state: th.Tensor, action: th.Tensor, learner: BaseAlgorithm, state_only: bool = False):
+    """
+    Concatenate state and action vectors if not state_only.
+    Observations and actions are preprocessed, discrete spaces are converted to one hot
+    and they are expected to have a shape (batch_size, *space.shape).
+    """
+    obs = get_features_extractor(learner).extract_features(state)
+    if state_only: return obs
+    act = preprocess_obs(action, learner.action_space).view(action.size(0), -1)
+    return th.cat((obs, act), dim=-1)
 
-def all_state_action(buffer, extract_features, state_only):
+def all_state_action(buffer: RolloutBuffer, learner: BaseAlgorithm, state_only: bool = False):
+    """ Equivalent of state_action on the whole RolloutBuffer."""
     t = lambda x: buffer.to_torch(x).view(buffer.buffer_size*buffer.n_envs, -1)
     if isinstance(buffer.observations, dict):
         observations = {k: t(v) for (k, v) in buffer.observations.items()} # OrderedDict?
     else:
         observations = t(buffer.observations)
-    observations = extract_features(observations)
     actions = t(buffer.actions)
-    return state_action(observations, actions, state_only, numpy=False)
+    return state_action(observations, actions, learner, state_only)

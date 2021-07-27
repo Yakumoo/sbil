@@ -11,43 +11,21 @@ from stable_baselines3.common.buffers import DictReplayBuffer, ReplayBuffer
 from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
 from sbil.demo.utils import get_demo_buffer, state_action, all_state_action
+from sbil.utils import action_loss, get_policy
 
-def behavioural_cloning(policy, demo_buffer, gradient_steps, learner, print_loss=None):
-    is_off = isinstance(learner, OffPolicyAlgorithm)
-    is_on = not is_off
-
-    if hasattr(policy, "actor") and policy.actor is not None:
-        policy_ = policy.actor
-    else:
-        policy_ = policy
+# TODO: scale or unscale actions
+def behavioural_cloning(policy, demo_buffer, gradient_steps, batch_size, env, print_loss=None):
 
     for i in range(gradient_steps):
-        demo_sample = demo_buffer.sample(learner.batch_size, learner._vec_normalize_env)
-        if is_on: # PPO, A2C
-            value, log_prob, entropy = policy_.evaluate_actions(
-                obs=demo_sample.observations,
-                actions=demo_sample.actions
-            )
-            loss = -log_prob.mean()
-        elif hasattr(policy_, "action_dist"): # SAC, TQC
-            policy_(demo_sample.observations)
-            loss = -policy_.action_dist.log_prob(demo_sample.actions).mean()
-        elif hasattr(policy_, "mu"): # TD3, DDPG
-            actions = policy_(demo_sample.observations)
-            loss = mse_loss(input=actions, target=demo_sample.actions)
-        elif hasattr(policy_, "q_net"): # DQN
-            loss = cross_entropy(
-                input=policy_.q_net(demo_sample.observations),
-                target=demo_sample.actions.squeeze()
-            )
-        elif hasattr(policy_, "quantile_net"): # QRDQN
-            loss = cross_entropy(
-                input=policy_.quantile_net(demo_sample.observations),
-                target=demo_sample.actions.squeeze()
-            )
-        policy_.optimizer.zero_grad()
+        demo_sample = demo_buffer.sample(batch_size=batch_size, env=env)
+        loss = action_loss(
+            policy=policy,
+            observations=demo_sample.observations,
+            actions=demo_sample.actions,
+        ).mean()
+        policy.optimizer.zero_grad()
         loss.backward()
-        policy_.optimizer.step()
+        policy.optimizer.step()
         if print_loss is not None and i%print_loss == 0:
             print("loss:", loss.item())
 
@@ -58,6 +36,13 @@ def bc(
     print_loss: Optional[int] = None
 ) -> Union[OnPolicyAlgorithm, OffPolicyAlgorithm]:
 
-    demo_buffer = get_demo_buffer(demo_buffer, learner)
-    behavioural_cloning(learner.policy, demo_buffer, gradient_steps, learner, print_loss)
+    demo_buffer_ = get_demo_buffer(demo_buffer, learner)
+    behavioural_cloning(
+        policy=get_policy(learner),
+        demo_buffer=demo_buffer_,
+        gradient_steps=gradient_steps,
+        batch_size=learner.batch_size if hasattr(learner, "batch_size") else learner.n_steps*learner.env.num_envs,
+        env=learner._vec_normalize_env,
+        print_loss=print_loss,
+    )
     return learner
