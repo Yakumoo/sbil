@@ -23,7 +23,7 @@ try:
 except ImportError:
     TQC, QRDN = None, None
 
-from sbil.demo.offline import behavioural_cloning
+from sbil.demo.buffer import double_buffer
 from sbil.demo.utils import get_demo_buffer, state_action, all_state_action
 from sbil.utils import set_method, MLP, set_restore, save, get_policy, action_loss, train_off, actor_loss, optimize_actor, optimize_critic
 
@@ -51,14 +51,16 @@ def actor_loss_(self, data, λ, mix):
     elif TQC is not None and isinstance(self, TQC):
         target = self.critic(obs, act).mean(dim=2).mean(dim=1, keepdim=True)
         current = self.critic(obs, data["actions_pi"]).mean(dim=2).mean(dim=1, keepdim=True)
+    else:
+        raise NotImplementedError(f"Actor_loss_ not implemented for {self}.")
 
     advantage = target - current
     loss = action_loss(get_policy(self), obs, act)
     if mix:
-        α = advantage > 0 if λ is None else F.sigmoid(advantage/λ)
+        α = (advantage > 0) if λ is None else F.sigmoid(advantage/λ)
         loss = α*loss - (1-α)*current # mix both loss, minus sign is critic maximization
     else: # regression loss only
-        loss *= advantage > 0 if λ is None else F.softplus(advantage, beta=λ) # weight or mask
+        loss *= (advantage > 0) if λ is None else F.softplus(advantage, beta=1/λ) # weight or mask
     if 'ent_coef' in data:
         loss += data['ent_coef'] * data['log_prob']
     loss = loss.mean()
@@ -73,8 +75,9 @@ def actor_loss_(self, data, λ, mix):
 def awac(
     learner: OffPolicyAlgorithm,
     demo_buffer: Union[DictReplayBuffer, ReplayBuffer, str, Path],
-    λ = 1,
+    λ = 0.1,
     mix: bool = False,
+    demo_rate: Optional[float] = None,
 ) -> OffPolicyAlgorithm:
     """
     Advantage weighted actor critic: https://arxiv.org/abs/2006.09359v6
@@ -83,11 +86,16 @@ def awac(
 
     :param λ: Loss scaler. If set to None, hard weight (0 or 1) is used
     :param mix: Mix regression loss and critic maximization loss
+    :param demo_rate: Proportion of demo samples during sampling
+        Useful if you gave an expert policy in the demo_buffer.
+        If you provide a random policy for exploration, consider not using it.
     """
     is_dqn = hasattr(learner, "q_net") or hasattr(learner, "quantile_net")
-    assert not (is_dqn and mix), "You can not use mix and a DQN like leaner."
+    assert not (is_dqn and mix), "You can not use mix and a DQN like learner."
 
-    if isinstance(demo_buffer, str):
+    if demo_rate is not None:
+        learner = double_buffer(learner, demo_buffer=demo_buffer, demo_rate=demo_rate)
+    elif isinstance(demo_buffer, str):
         learner.load_replay_buffer(demo_buffer)
     else:
         demo_buffer_ = get_demo_buffer(demo_buffer, learner)

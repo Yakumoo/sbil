@@ -20,9 +20,8 @@ import gym
 
 def compute_returns_and_advantage(self, super_, demo_buffer, learner, state_only: bool = False, max_size=-1, σ2=None, *args, **kwargs) -> None:
     if max_size > 1: # subsample
-        #view = self.buffer_size*self.n_envs, -1
         demo_sample = demo_buffer.sample(max_size)
-        demo_sa = state_action(demo_sample.observations, demo_sample.actions, learner, state_only, numpy=False)
+        demo_sa = state_action(demo_sample.observations, demo_sample.actions, learner, state_only)
         σ2 = np.median(np.square(np.linalg.norm(demo_sa-demo_sa[:,None], axis=-1))).item()
     else: # use all, high memory consumption
         σ2 = σ2 # σ2 is precomputed

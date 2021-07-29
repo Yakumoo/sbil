@@ -3,7 +3,7 @@ Stable Baselines Imitation Learning
 
 ### Installation
 ```
-pip install git+https://github.com/Yakumoo/sbil.git
+pip install git+https://github.com/Yakumoo/sbil
 ```
 
 ### Quickstart

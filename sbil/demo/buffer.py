@@ -15,10 +15,10 @@ import numpy as np
 import gym
 
 
-def sample(self, batch_size, env, *args, super_, demo_buffer, policy_reward=None, **kwargs) -> Union[DictReplayBufferSamples, ReplayBufferSamples]:
-    exp_size = batch_size//2
-    replay_data = super_(batch_size=exp_size, env=env, *args, **kwargs)
-    demo_sample = demo_buffer.sample(batch_size=batch_size-exp_size, env=env)
+def sample(self, batch_size, env, *args, super_, demo_buffer, policy_reward=None, demo_rate=0.5, **kwargs) -> Union[DictReplayBufferSamples, ReplayBufferSamples]:
+    demo_size = int(batch_size*demo_rate)
+    demo_sample = demo_buffer.sample(batch_size=demo_size, env=env)
+    replay_data = super_(batch_size=batch_size-demo_size, env=env, *args, **kwargs)
 
     if policy_reward is not None:
         replay_data.rewards[:] = policy_reward
@@ -41,6 +41,7 @@ def double_buffer( # SQIL
     demo_buffer: Union[DictReplayBuffer, ReplayBuffer, str, Path],
     demo_reward = None,
     policy_reward = None,
+    demo_rate: float = 0.5
 ) -> OffPolicyAlgorithm:
     """
     Double buffer decorator
@@ -56,7 +57,7 @@ def double_buffer( # SQIL
         Default is unchanged (rewards of the environment).
     :return leaner: decorated learner
     """
-
+    assert 0 < demo_rate < 1, "demo_rate must be in [0, 1]."
     demo_buffer = get_demo_buffer(demo_buffer, learner)
     if demo_reward is not None:
         demo_buffer.rewards[:] = demo_reward
@@ -67,6 +68,7 @@ def double_buffer( # SQIL
         old="sample",
         new=sample,
         demo_buffer=demo_buffer,
-        policy_reward=policy_reward
+        policy_reward=policy_reward,
+        demo_rate=demo_rate,
     )
     return learner

@@ -209,28 +209,19 @@ class EvalSaveGif(EvalCallback):
         *args,
         period: int = 1,
         mode='rgb_array',
-        config_path: Optional[Dict[str, str]]= None,
+        #config_path: Optional[Dict[str, str]]= None,
         **kwargs,
     ):
         super(EvalSaveGif, self).__init__(eval_env=eval_env, *args, **kwargs)
         self.count = 0
         self.mode = mode
         self.period = period
-        self.config_path = config_path
+        #self.config_path = config_path
 
     def _on_training_start(self): # setup the csv logger
         self.dir = self.logger.get_dir() or self.log_path
-        logger = configure(
-            folder=self.dir,
-            format_strings=(
-                ['csv', 'tensorboard'] if self.model.tensorboard_log is not None
-                else ['csv']
-            )
-        )
-        self.model.set_logger(logger) # set logger to the model
-        self.logger = logger # set logger to the callback
-        if self.config_path is not None:
-            shutil.copyfile(self.config_path, self.dir + "/config.yaml")
+        #if self.config_path is not None:
+        #shutil.copyfile(self.config_path, self.dir + "/config.yaml")
 
     def _log_success_callback(self, locals_, globals_) -> None:
         super()._log_success_callback(locals_, globals_)
@@ -493,8 +484,11 @@ def make_learner(
             f = attrgetter(category + "." + config_algorithm.pop(category))
             il_algorithm = f(sbil)
         if category == "demo": # generate demo_buffer is needed
-            if config_algorithm.get('demo_buffer', None) is None:
+            demo_buffer = config_algorithm.get('demo_buffer', None)
+            if demo_buffer is None:
                 config_algorithm['demo_buffer'] = generate_demo(env)
+            elif isinstance(demo_buffer, dict):
+                config_algorithm['demo_buffer'] = generate_demo(env, **demo_buffer)
         learner = il_algorithm(learner, **config_algorithm)
         config_algorithm['algo'] = il_algorithm.__name__
 
@@ -553,6 +547,29 @@ def action_loss(policy: BasePolicy, observations: th.Tensor, actions: th.Tensor)
             input = input.mean(1)
         loss = F.cross_entropy(input=input, target=actions.squeeze(), reduction='none')
     return loss.view(-1, 1)
+
+def scale_action(action: np.ndarray, space) -> np.ndarray:
+    """
+    Rescale the action from [low, high] to [-1, 1]
+    (no need for symmetric action space)
+    :param action: Action to scale
+    :return: Scaled action
+    """
+    if not isinstance(space, gym.spaces.Box):
+        return action
+    low, high = space.low, space.high
+    return 2.0 * ((action - low) / (high - low)) - 1.0
+
+def unscale_action(scaled_action: np.ndarray, space) -> np.ndarray:
+    """
+    Rescale the action from [-1, 1] to [low, high]
+    (no need for symmetric action space)
+    :param scaled_action: Action to un-scale
+    """
+    if not isinstance(space, gym.spaces.Box):
+        return scaled_action
+    low, high = space.low, space.high
+    return low + (0.5 * (scaled_action + 1.0) * (high - low))
 
 def add_metric(x, y=None) -> None:
     if y is None: return
@@ -771,7 +788,6 @@ def optimize_actor(self, data):
             polyak_update(self.actor.parameters(), self.actor_target.parameters(), self.tau)
 
 def record(self, metrics, data):
-    #print(list(data.keys()))
     if 'actor_loss' in metrics:
         self.logger.record("train/actor_loss", np.mean(metrics['actor_loss']))
         self.logger.record("train/critic_loss", np.mean(metrics['critic_loss']))
@@ -807,6 +823,7 @@ def train_off(
 
     for gradient_step in range(gradient_steps):
         data['gradient_step'] = gradient_step
+        self._n_updates += 1
         data['replay'] = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)
 
         if self.use_sde:
@@ -824,6 +841,5 @@ def train_off(
 
         add_metric(metrics, end(self, data)) # end setup
 
-    self._n_updates += gradient_steps
     self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
     record(self, metrics, data)

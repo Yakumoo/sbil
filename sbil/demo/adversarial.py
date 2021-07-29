@@ -27,7 +27,7 @@ import gym
 
 
 
-def discriminator_step(discriminator, buffer_sample, demo_buffer, learner, state_only, λ=1, center=1):
+def discriminator_step(discriminator, buffer_sample, demo_buffer, learner, state_only, λ=1, center=1, η=None):
     batch_size = buffer_sample.actions.shape[0]
     extract_features = get_policy(learner).extract_features
     demo_sample = demo_buffer.sample(batch_size, learner._vec_normalize_env)
@@ -35,47 +35,52 @@ def discriminator_step(discriminator, buffer_sample, demo_buffer, learner, state
     sa = state_action(buffer_sample.observations, buffer_sample.actions, learner, state_only)
     demo_sa = state_action(demo_sample.observations, demo_sample.actions, learner, state_only)
 
+    # regularization: zero-centered gradient penalty: https://openreview.net/pdf?id=ByxPYjC5KQ
     α = th.rand(batch_size,1).to(learner.device)
-    with th.autograd.set_detect_anomaly(True):
-        # regularization: zero-centered gradient penalty: https://openreview.net/pdf?id=ByxPYjC5KQ
-        inputs = th.autograd.Variable(sa*α + (1-α)*demo_sa, requires_grad=True).to(learner.device)
-        outputs = discriminator(inputs)
-        gradients = th.autograd.grad(
-            outputs=outputs,
-            inputs=inputs,
-            grad_outputs=th.ones(outputs.size()).to(learner.device),
-            create_graph=True,
-            retain_graph=True,
-            only_inputs=True,
-        )[0]
-        penalty = λ * th.square(th.linalg.norm(gradients)-center)
-        # discrimination loss
-        input = discriminator(th.cat((sa, demo_sa), dim=0)).squeeze()
-        target = th.cat((th.zeros(batch_size), th.ones(batch_size)), dim=0)
+    inputs = th.autograd.Variable(sa*α + (1-α)*demo_sa, requires_grad=True).to(learner.device)
+    outputs = discriminator(inputs)
+    gradients = th.autograd.grad(
+        outputs=outputs,
+        inputs=inputs,
+        grad_outputs=th.ones(outputs.size()).to(learner.device),
+        create_graph=True,
+        retain_graph=True,
+        only_inputs=True,
+    )[0]
+    penalty = λ * th.square(th.linalg.norm(gradients)-center)
+    # discrimination loss
+    if η is None: # positive negative
+        input = discriminator(th.cat((demo_sa, sa), dim=0)).squeeze()
+        target = th.cat((th.ones(batch_size), th.zeros(batch_size)), dim=0)
         loss = binary_cross_entropy_with_logits(input=input, target=target)
-        #loss = logsigmoid(discriminator(sa)) + logsigmoid(-discriminator(demo_sa))
-        loss = loss.mean() + penalty.mean()
-        discriminator.optimizer.zero_grad()
-        loss.backward()
-        discriminator.optimizer.step()
+    else: # Positive unlabeled
+        input = discriminator(th.cat((demo_sa, demo_sa, sa), dim=0)).squeeze()
+        target = th.cat((th.ones(batch_size), th.zeros(batch_size*2)), dim=0)
+        weight = th.cat((th.ones(batch_size*2)*η, th.ones(batch_size)), dim=0)
+        loss = binary_cross_entropy_with_logits(input=input, target=target, weight=weight)
+
+    loss = loss.mean() + penalty.mean()
+    discriminator.optimizer.zero_grad()
+    loss.backward()
+    discriminator.optimizer.step()
+
     return loss.item()
 
 
-def train_off(self, gradient_steps, super_, discriminator, demo_buffer, state_only: bool = False, *args, **kwargs) -> None:
+def train_off(self, gradient_steps, super_, discriminator, demo_buffer, state_only: bool = False, η=None, *args, **kwargs) -> None:
     for gradient_step in range(gradient_steps):
         replay_data = self.replay_buffer.sample(self.batch_size, self._vec_normalize_env)
-        discriminator_step(discriminator, replay_data, demo_buffer, self, state_only)
+        discriminator_step(discriminator, replay_data, demo_buffer, self, state_only, η=η)
     super_(gradient_steps, *args, **kwargs)
 
-def train_on(self, super_, discriminator, demo_buffer, state_only: bool = False, *args, **kwargs) -> None:
+def train_on(self, super_, discriminator, demo_buffer, state_only: bool = False, η=None, *args, **kwargs) -> None:
     for epoch in range(getattr(self, "n_epochs", 1)):
         for rollout_data in self.rollout_buffer.get(batch_size=getattr(self, "batch_size", None)):
-            discriminator_step(discriminator, rollout_data, demo_buffer, self, state_only)
+            discriminator_step(discriminator, rollout_data, demo_buffer, self, state_only, η=η)
     super_(*args, **kwargs)
 
 def sample(self, batch_size, env, *args, super_, discriminator, learner, state_only: bool = False, **kwargs) -> Union[DictReplayBufferSamples, ReplayBufferSamples]:
     replay_data = super_(batch_size=batch_size, env=env, *args, **kwargs)
-    #state = extract_features(replay_data.observations)
     sa = state_action(replay_data.observations, replay_data.actions, learner, state_only)
     out = discriminator(sa)
     replay_data.rewards[:] = logsigmoid(out) - logsigmoid(-out)
@@ -94,6 +99,7 @@ def adversarial(
     demo_buffer: Union[DictReplayBuffer, ReplayBuffer, str, Path],
     state_only: bool = False,
     net_arch: List[int] = [64, 64],
+    η: Optional[float] = None,
     load: Optional[str] = None,
 ) -> Union[OnPolicyAlgorithm, OffPolicyAlgorithm]:
     """
@@ -107,6 +113,8 @@ def adversarial(
     :param demo_buffer: Demonstration replay buffer
     :param state_only: Use state only
         default is the concatenation of the state-action pair
+    :param η: Positive class prior, usually set to 0.5 in papers. PURL is disabled by default.
+        https://arxiv.org/abs/1911.00459
     :param load: Zip file containing state_dict of the discriminator to resume a training.
         It should be the same as the path used with .load(path)
     :return leaner: Decorated learner
@@ -147,6 +155,7 @@ def adversarial(
         discriminator=discriminator,
         demo_buffer=demo_buffer,
         state_only=state_only,
+        η=η,
     )
 
     # overwrite set_method with additional arguments

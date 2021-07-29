@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
+import gym
 
 from stable_baselines3.common.buffers import DictReplayBuffer, ReplayBuffer
 from stable_baselines3.common.preprocessing import get_action_dim, get_obs_shape
@@ -17,10 +18,17 @@ from sbil.data.policies.gym_solutions import (
     bipedal_walker,
 )
 
-def generate_demo(env, policy=None, noise=0, buffer_size=10000, device='cpu', optimize_memory_usage=False):
+def scale_action(action: np.ndarray, space) -> np.ndarray:
+    if not isinstance(space, gym.spaces.Box): return action
+    low, high = space.low, space.high
+    return 2.0 * ((action - low) / (high - low)) - 1.0
+
+def generate_demo(env, policy=None, noise=0, buffer_size=100000, device='cpu', optimize_memory_usage=False):
     """
     Return a ReplayBufer filled with demonstrations.
     """
+    if isinstance(env, str):
+        env = gym.make(env)
     if isinstance(env, VecEnv):
         id = env.get_attr("spec")[0].id
     elif hasattr(env, "envs"):
@@ -78,13 +86,19 @@ def generate_demo(env, policy=None, noise=0, buffer_size=10000, device='cpu', op
             dones[i] = done
             infos[i] = info
             obs = next_obs
-        for info in infos[i]: # indicate last step as truncated
+
+        # indicate last step as truncated
+        for info in infos[i]:
             for info_ in info:
                 info_['TimeLimit.truncated'] = True
+
+        # scale actions
+        actions = scale_action(actions, env.action_space)
+
         # flatten envs
         data = (observations, next_observations, actions, rewards, dones, infos)
         data = list(map(lambda x: x.reshape(n*num_envs, -1), data))
-        #observations, next_observations, actions, rewards, dones, infos = data
+
         for obs, next_obs, action, reward, done, info in zip(*data):
             demo_buffer.add(
                 obs=obs,
@@ -94,7 +108,7 @@ def generate_demo(env, policy=None, noise=0, buffer_size=10000, device='cpu', op
                 done=done,
                 infos=[info[0]],
             )
-    else: # one nev, sequential
+    else: # one env, sequential
         while not demo_buffer.full:
             obs = env.reset()
             done = False
@@ -104,7 +118,7 @@ def generate_demo(env, policy=None, noise=0, buffer_size=10000, device='cpu', op
                 demo_buffer.add(
                     obs=obs,
                     next_obs=next_obs,
-                    action=action,
+                    action=scale_action(action, env.action_space),
                     reward=reward,
                     done=done,
                     infos=[info],

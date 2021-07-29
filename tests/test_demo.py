@@ -20,7 +20,7 @@ def test_off(learner_class, algorithm):
 
 @pytest.mark.parametrize("env_id", ['MountainCarContinuous-v0', 'CartPole-v0'])
 @pytest.mark.parametrize("learner_class", [PPO, A2C])
-@pytest.mark.parametrize("algorithm", [adversarial, dril, bc, red, gmmil])
+@pytest.mark.parametrize("algorithm", [adversarial, bc, red, gmmil])
 def test_on(env_id, learner_class, algorithm):
     run(env_id, learner_class, algorithm)
 

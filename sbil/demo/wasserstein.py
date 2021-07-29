@@ -58,7 +58,8 @@ def _store_transition(
             print("Episode done with overflow:", self.n)
             self.pool_sa = np.array(demo_sa)
             s = len(self.pool_sa)
-            self.pool_w = np.ones(s) / s + 1e-6; self.n = 0
+            self.pool_w = np.ones(s) / s + 1e-6
+            self.n = 0
         return
     # Store only the unnormalized version
     if self._vec_normalize_env is not None:
@@ -72,7 +73,7 @@ def _store_transition(
     t = lambda x: self.replay_buffer.to_torch(x)
     obs = self._last_original_obs
     obs = {k: t(v) for k,v in obs.items()} if isinstance(obs, dict) else t(obs)
-    sa = state_action(obs, t(buffer_action), self, state_only)
+    sa = state_action(obs, t(buffer_action), self, state_only).detach().numpy()
     sa = scaler.transform(sa)[0] # standardized state-action
 
     # upper bound wasserstein distance greedy coupling
@@ -105,7 +106,8 @@ def _store_transition(
     if done: # re-initialize back to the original
         self.pool_sa = np.array(demo_sa)
         s = len(self.pool_sa)
-        self.pool_w = np.ones(s) / s + 1e-6; self.n = 0
+        self.pool_w = np.ones(s) / s + 1e-6
+        self.n = 0
 
     # As the VecEnv resets automatically, new_obs is already the
     # first observation of the next episode
@@ -172,13 +174,7 @@ def pwil(
     else:
         demo_obs = t(demo_obs[:s])
     demo_sa = state_action(demo_obs, t(demo_buffer.actions[:s]), learner, state_only).numpy()
-    """
-    demo_sa = p.extract_features(demo_obs).detach().numpy()
-    if not state_only:
-        demo_act = t(demo_buffer.actions[:s])
-        demo_act = preprocess_obs(demo_act, learner.action_space).detach().numpy()
-        demo_sa = np.concatenate((demo_sa, demo_act), axis=-1)
-    """
+
     scaler = StandardScaler()
     demo_sa = scaler.fit_transform(demo_sa) # stadardize
 
@@ -191,7 +187,8 @@ def pwil(
     if not state_only:
         σ += get_action_dim(learner.action_space)
     σ = β * T / np.sqrt(σ)
-    learner.σ = σ.item(); learner.n = 0
+    learner.σ = σ.item()
+    learner.n = 0
 
     set_method(
         learner,
