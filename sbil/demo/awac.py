@@ -57,10 +57,11 @@ def actor_loss_(self, data, λ, mix):
     advantage = target - current
     loss = action_loss(get_policy(self), obs, act)
     if mix:
-        α = (advantage > 0) if λ is None else F.sigmoid(advantage/λ)
+        α = (advantage > 0).float() if λ is None else torch.sigmoid(advantage/λ)
         loss = α*loss - (1-α)*current # mix both loss, minus sign is critic maximization
     else: # regression loss only
-        loss *= (advantage > 0) if λ is None else F.softplus(advantage, beta=1/λ) # weight or mask
+        loss *= (advantage > 0) if λ is None else F.relu(advantage)/λ # weight or mask
+
     if 'ent_coef' in data:
         loss += data['ent_coef'] * data['log_prob']
     loss = loss.mean()
