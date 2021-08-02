@@ -114,6 +114,17 @@ def red(
         load(path, modules=modules)
     set_method(learner, old="save", new=partial(save, modules=modules))
 
+    # train rnd
+    batch_size = learner.batch_size if hasattr(learner, "batch_size") else learner.n_steps*learner.env.num_envs
+    for i in range(gradient_steps):
+        demo_sample = demo_buffer.sample(batch_size, env=learner._vec_normalize_env)
+        sa = state_action(demo_sample.observations, demo_sample.actions, learner, state_only)
+        loss = rnd(sa).mean()
+        rnd.optimizer.zero_grad()
+        loss.backward()
+        rnd.optimizer.step()
+    print("rnd loss", loss.item())
+
     # automatic reward scale
     if reward_scale is None and not hasattr(learner, "reward_scale"):
         normalize = learner._vec_normalize_env.normalize_obs if learner._vec_normalize_env is not None else lambda x: x
@@ -131,10 +142,9 @@ def red(
         )
         sa = th.cat(sa, dim=0)
         mean_error = rnd(sa).mean().item()
-        reward_scale = 100 / mean_error # Rescale approximately to 100
+        reward_scale = int(100 / mean_error) # Rescale approximately to 100
         print("Reward scale:", reward_scale)
     learner.reward_scale = reward_scale
-
 
     # overwrite set_method with additional arguments
     set_method_ = partial(
@@ -152,16 +162,5 @@ def red(
         set_method_(learner.rollout_buffer, old="compute_returns_and_advantage", new=compute_returns_and_advantage)
     else:
         raise NotImplementedError()
-
-    # train rnd
-    batch_size = learner.batch_size if hasattr(learner, "batch_size") else learner.n_steps*learner.env.num_envs
-    for i in range(gradient_steps):
-        demo_sample = demo_buffer.sample(batch_size, env=learner._vec_normalize_env)
-        sa = state_action(demo_sample.observations, demo_sample.actions, learner, state_only)
-        loss = rnd(sa).mean()
-        rnd.optimizer.zero_grad()
-        loss.backward()
-        rnd.optimizer.step()
-    print("rnd loss", loss.item())
 
     return learner

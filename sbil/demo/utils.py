@@ -30,8 +30,8 @@ class AbsorbingState(gym.ObservationWrapper):
         if isinstance(self.observation_space, Box):
             assert len(self.observation_space.shape) == 1, "For Box spaces, 1D space are only supported"
             self.observation_space = Box(
-                low=np.hstack((self.observation_space.low,-1)),
-                high=np.hstack((self.observation_space.high,1)),
+                low=np.hstack((self.observation_space.low, -1)),
+                high=np.hstack((self.observation_space.high, 1)),
                 dtype=self.observation_space.dtype,
             )
         else:
@@ -40,7 +40,7 @@ class AbsorbingState(gym.ObservationWrapper):
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         observation, reward, done, info = self.env.step(action)
         # indicate absorb: end of episode and no timeout
-        self.absorb = done and not info.get('TimeLimit.truncated', False)
+        self.absorb = done # and not info.get('TimeLimit.truncated', False)
         return self.observation(observation), reward, done, info
 
     def observation(self, observation):
@@ -62,7 +62,7 @@ def replay_buffer_with_absorbing(replay_buffer: ReplayBuffer) -> ReplayBuffer:
         o.low = np.hstack((o.low, 0))
         o.shape = o.shape[0]+1,
         b = replay_buffer # alias
-        absorb = b.dones*(1-b.timeouts)
+        absorb = b.dones#*(1-b.timeouts)
         absorb = absorb[:,None]
         if b.optimize_memory_usage:
             absorb = np.roll(absorb, 1, axis=-1)

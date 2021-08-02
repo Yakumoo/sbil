@@ -19,43 +19,7 @@ from stable_baselines3.common.type_aliases import (
 from sbil.demo.offline import behavioural_cloning
 from sbil.demo.utils import get_demo_buffer, state_action, all_state_action
 from sbil.utils import set_method, set_restore, save, get_policy, action_loss, train_off
-"""
-def train_off(self, gradient_steps, super_, demo_buffer, *args, **kwargs) -> None:
-    behavioural_cloning(get_policy(self), demo_buffer, gradient_steps, self.batch_size, self._vec_normalize_env)
-    super_(gradient_steps, *args, **kwargs)
 
-
-def sample(self, batch_size, env, *args, super_, Π, **kwargs) -> Union[DictReplayBufferSamples, ReplayBufferSamples]:
-    replay_data = super_(batch_size=batch_size, env=env, *args, **kwargs)
-    value = tuple(action_loss(π, replay_data.observations, replay_data.actions) for π in Π)
-    rewards = -th.var(th.stack(value, dim=0), unbiased=True, dim=0)
-    replay_data.rewards[:] = rewards.view(batch_size, self.n_envs)
-
-    return replay_data
-
-def train_on(self, super_, demo_buffer, *args, **kwargs) -> None:
-    behavioural_cloning(
-        policy=self.policy,
-        demo_buffer=demo_buffer,
-        gradient_steps=getattr(self, "n_epochs", 1),
-        batch_size=getattr(self, "batch_size", self.n_steps*self.env.num_envs),
-        env=self._vec_normalize_env,
-    )
-    super_(*args, **kwargs)
-
-def compute_returns_and_advantage(self, super_, Π, *args, **kwargs) -> None:
-    t = lambda x: self.to_torch(x).view(self.buffer_size*self.n_envs, -1)
-    if isinstance(self.observations, dict):
-        obs = {k: t(o) for k, o in self.observations.items()}
-    else:
-        obs = t(self.observations)
-    actions = t(self.actions).squeeze()
-    log_prob = th.stack([π.evaluate_actions(obs, actions)[1] for π in Π], dim=0)
-    # variance of log_prob not between 0 and 1
-    var = th.var(log_prob, unbiased=True, dim=0)
-    self.rewards[:] = -var.view(self.buffer_size, self.n_envs).detach().numpy()
-    super_(*args, **kwargs)
-"""
 
 def actor_loss(self, data, Π, demo_buffer):
     # the critic is not needed.
@@ -125,19 +89,5 @@ def dril(
         new=train_off,
         actor_loss=partial(actor_loss, Π=Π, demo_buffer=demo_buffer),
     )
-    """
-    # overwrite set_method with additional arguments
-    set_method_ = partial(
-        set_method,
-        Π=Π,
-    )
 
-    # modify the buffer to change the reward
-    if is_off:
-        set_method_(learner.replay_buffer, old="sample", new=sample)
-    elif is_on:
-        set_method_(learner.rollout_buffer, old="compute_returns_and_advantage", new=compute_returns_and_advantage)
-    else:
-        raise NotImplementedError()
-    """
     return learner
