@@ -52,12 +52,12 @@ def discriminator_step(discriminator, buffer_sample, demo_buffer, learner, state
     if η is None: # positive negative
         input = discriminator(th.cat((demo_sa, sa), dim=0)).squeeze()
         target = th.cat((th.ones(batch_size), th.zeros(batch_size)), dim=0)
-        loss = binary_cross_entropy_with_logits(input=input, target=target)
+        weight = None
     else: # Positive unlabeled
-        input = discriminator(th.cat((demo_sa, demo_sa, sa), dim=0)).squeeze()
+        input = discriminator(th.cat((demo_sa, sa, demo_sa), dim=0)).squeeze()
         target = th.cat((th.ones(batch_size), th.zeros(batch_size*2)), dim=0)
-        weight = th.cat((th.ones(batch_size*2)*η, th.ones(batch_size)), dim=0)
-        loss = binary_cross_entropy_with_logits(input=input, target=target, weight=weight)
+        weight = th.cat((th.ones(batch_size)*η, th.ones(batch_size), -th.ones(batch_size)*η), dim=0)
+    loss = binary_cross_entropy_with_logits(input=input, target=target, weight=weight)
 
     loss = loss.mean() + penalty.mean()
     discriminator.optimizer.zero_grad()

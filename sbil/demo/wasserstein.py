@@ -53,7 +53,7 @@ def _store_transition(
     if self.n > T: # overflow
         self.n += 1
         if self.n == T:
-            print("episode time step more than expected.")
+            print("Episode time step more than expected.")
         if done: # re-initialize back to the original
             print("Episode done with overflow:", self.n)
             self.pool_sa = np.array(demo_sa)

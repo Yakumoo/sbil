@@ -96,7 +96,7 @@ def safe_eval(s:str) -> None:
 class TimeLimitAware(gym.ObservationWrapper):
     """ Copy paste from https://github.com/openai/gym/blob/master/gym/wrappers/time_limit.py """
     def __init__(self, env, max_episode_steps=None):
-        super(TimeLimit, self).__init__(env)
+        super(TimeLimitAware, self).__init__(env)
         if max_episode_steps is None and self.env.spec is not None:
             max_episode_steps = env.spec.max_episode_steps
         if self.env.spec is not None:
@@ -105,14 +105,14 @@ class TimeLimitAware(gym.ObservationWrapper):
         self._elapsed_steps = None
 
         if isinstance(self.observation_space, Box):
-            assert len(self.observation_space.shape) == 1, "For Box spaces, 1D spaces are only supported"
+            assert len(self.observation_space.shape) == 1, "For Box spaces, 1D spaces are only supported."
             self.observation_space = Box(
                 low=np.hstack((self.observation_space.low,-1)),
                 high=np.hstack((self.observation_space.high,1)),
                 dtype=self.observation_space.dtype,
             )
         else:
-            raise NotImplementedError()
+            raise NotImplementedError(f"TimeLimitAware does not support {self.observation_space}.")
 
     def step(self, action):
         assert self._elapsed_steps is not None, "Cannot call env.step() before calling reset()"
@@ -130,7 +130,7 @@ class TimeLimitAware(gym.ObservationWrapper):
 
     def reset(self, **kwargs):
         self._elapsed_steps = 0
-        return self.env.reset(**kwargs)
+        return self.observation(self.env.reset(**kwargs))
 
 
 class MLP(th.nn.Module):
@@ -341,11 +341,15 @@ def save(
     modules: List[th.nn.Module],
     *args, **kwargs
 ) -> None:
-    """ Save method to save additional modules in the zip file."""
+    """
+    Save method to save additional modules in the zip file.
+    Save models with .pt extensions as .pth is reserved for stable baselines:
+    https://github.com/DLR-RM/stable-baselines3/blob/master/stable_baselines3/common/save_util.py
+    """
     super_(path=path, *args, **kwargs)
     with ZipFile(path, mode="a") as archive:
         for name, model in modules.items():
-            with archive.open('sbil_' + name + ".pth", mode="w") as f:
+            with archive.open('sbil_' + name + ".pt", mode="w") as f:
                 th.save(model.state_dict(), f)
 
 def load(path: str, modules: Dict[str, th.nn.Module]) -> None:
@@ -357,7 +361,7 @@ def load(path: str, modules: Dict[str, th.nn.Module]) -> None:
             "Some modules are missing. Make sure you saved the model with sbil."
         )
         for name, model in modules.items():
-            with archive.open('sbil_' + name + '.pth', mode="r") as f:
+            with archive.open('sbil_' + name + '.pt', mode="r") as f:
                 models.load_state_dict(th.load(f))
 
 def ok(x: Dict[str, Any]) -> bool:
@@ -469,6 +473,7 @@ def make_learner(
     else:
         print(f"Loading learner {load}.")
         learner = learner_class.load(load, env=env)
+        learner._last_obs = None # this will reset the environment
 
     # algorithm
     il_algorithm = None
