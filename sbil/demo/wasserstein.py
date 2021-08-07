@@ -73,7 +73,7 @@ def _store_transition(
     t = lambda x: self.replay_buffer.to_torch(x)
     obs = self._last_original_obs
     obs = {k: t(v) for k,v in obs.items()} if isinstance(obs, dict) else t(obs)
-    sa = state_action(obs, t(buffer_action), self, state_only).detach().numpy()
+    sa = state_action(obs, t(buffer_action), self, state_only).cpu().numpy()
     sa = scaler.transform(sa)[0] # standardized state-action
 
     # upper bound wasserstein distance greedy coupling
@@ -173,7 +173,7 @@ def pwil(
         demo_obs = {k:t(v[:s]) for k, v in demo_obs.items()}
     else:
         demo_obs = t(demo_obs[:s])
-    demo_sa = state_action(demo_obs, t(demo_buffer.actions[:s]), learner, state_only).numpy()
+    demo_sa = state_action(demo_obs, t(demo_buffer.actions[:s]), learner, state_only).cpu().numpy()
 
     scaler = StandardScaler()
     demo_sa = scaler.fit_transform(demo_sa) # stadardize

@@ -34,14 +34,16 @@ import gym
 def sample(self, batch_size, env, *args, super_, rnd, learner, reward_scale, state_only: bool = False, **kwargs) -> Union[DictReplayBufferSamples, ReplayBufferSamples]:
     replay_data = super_(batch_size=batch_size, env=env, *args, **kwargs)
     sa = state_action(replay_data.observations, replay_data.actions, learner, state_only)
-    rewards = rnd(sa).mean(-1).view(batch_size, self.n_envs)
+    with th.no_grad():
+        rewards = rnd(sa).mean(-1).view(batch_size, self.n_envs)
     replay_data.rewards[:] = -rewards * reward_scale
     return replay_data
 
 def compute_returns_and_advantage(self, super_, rnd, learner, reward_scale, state_only: bool = False, *args, **kwargs) -> None:
     sa = all_state_action(self, learner, state_only)
-    rewards = rnd(sa).mean(-1).view(self.buffer_size, self.n_envs)
-    rewards = rewards.detach().numpy()
+    with th.no_grad():
+        rewards = rnd(sa).mean(-1).view(self.buffer_size, self.n_envs)
+    rewards = rewards.cpu().numpy()
     self.rewards[:] = -rewards * reward_scale
     super_(*args, **kwargs)
 

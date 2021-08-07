@@ -10,8 +10,8 @@ from sbil.data.generate_demo import generate_demo
 def run(env_id, learner_class, algorithm):
     env = gym.make(env_id)
     learner = learner_class(env=env, policy="MlpPolicy")
-    learner = algorithm(learner, demo_buffer=generate_demo(env, buffer_size=1000))
-    learner.learn(1000)
+    learner = algorithm(learner, demo_buffer=generate_demo(env, buffer_size=100))
+    learner.learn(500)
 
 @pytest.mark.parametrize("learner_class", [TD3, SAC, TQC])
 @pytest.mark.parametrize("algorithm", [adversarial, pwil, awac, dril, bc, red, double_buffer])

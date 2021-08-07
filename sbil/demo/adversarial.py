@@ -56,8 +56,8 @@ def discriminator_step(discriminator, buffer_sample, demo_buffer, learner, state
     else: # Positive unlabeled
         input = discriminator(th.cat((demo_sa, sa, demo_sa), dim=0)).squeeze()
         target = th.cat((th.ones(batch_size), th.zeros(batch_size*2)), dim=0)
-        weight = th.cat((th.ones(batch_size)*η, th.ones(batch_size), -th.ones(batch_size)*η), dim=0)
-    loss = binary_cross_entropy_with_logits(input=input, target=target, weight=weight)
+        weight = th.cat((th.ones(batch_size)*η, th.ones(batch_size), -th.ones(batch_size)*η), dim=0).to(learner.device)
+    loss = binary_cross_entropy_with_logits(input=input, target=target.to(learner.device), weight=weight)
 
     loss = loss.mean() + penalty.mean()
     discriminator.optimizer.zero_grad()
@@ -82,16 +82,16 @@ def train_on(self, super_, discriminator, demo_buffer, state_only: bool = False,
 def sample(self, batch_size, env, *args, super_, discriminator, learner, state_only: bool = False, **kwargs) -> Union[DictReplayBufferSamples, ReplayBufferSamples]:
     replay_data = super_(batch_size=batch_size, env=env, *args, **kwargs)
     sa = state_action(replay_data.observations, replay_data.actions, learner, state_only)
-    out = discriminator(sa)
-    replay_data.rewards[:] = logsigmoid(out) - logsigmoid(-out)
+    with th.no_grad():
+        replay_data.rewards[:] = discriminator(sa)
 
     return replay_data
 
 def compute_returns_and_advantage(self, super_, discriminator, learner, state_only: bool = False, *args, **kwargs) -> None:
     sa = all_state_action(self, learner, state_only)
-    out = discriminator(sa)
-    rewards = logsigmoid(out) - logsigmoid(-out)
-    self.rewards[:] = rewards.view(self.buffer_size, self.n_envs).detach().numpy() # unstack
+    with th.no_grad():
+        out = discriminator(sa)
+    self.rewards[:] = out.view(self.buffer_size, self.n_envs).cpu().numpy() # unstack
     super_(*args, **kwargs)
 
 def adversarial(
