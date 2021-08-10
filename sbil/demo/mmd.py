@@ -19,15 +19,17 @@ import gym
 
 
 def compute_returns_and_advantage(self, super_, demo_buffer, learner, state_only: bool = False, max_size=-1, σ2=None, *args, **kwargs) -> None:
-    if max_size > 1: # subsample
-        demo_sample = demo_buffer.sample(max_size)
-        demo_sa = state_action(demo_sample.observations, demo_sample.actions, learner, state_only).cpu().numpy()
-        σ2 = np.median(np.square(np.linalg.norm(demo_sa-demo_sa[:,None], axis=-1))).item()
-    else: # use all, high memory consumption
-        σ2 = σ2 # σ2 is precomputed
-        demo_sa = all_state_action(demo_buffer, learner, state_only).cpu().numpy()
+    with th.no_grad():
+        if max_size > 1: # subsample
+            demo_sample = demo_buffer.sample(max_size)
+            demo_sa = state_action(demo_sample.observations, demo_sample.actions, learner, state_only).cpu().numpy()
+            σ2 = np.median(np.square(np.linalg.norm(demo_sa-demo_sa[:,None], axis=-1))).item()
+        else: # use all, high memory consumption
+            σ2 = σ2 # σ2 is precomputed
+            demo_sa = all_state_action(demo_buffer, learner, state_only).cpu().numpy()
 
-    sa = all_state_action(self, learner, state_only).cpu().numpy()
+        sa = all_state_action(self, learner, state_only).cpu().numpy()
+        
     d1 = np.square(np.linalg.norm(sa-demo_sa[:,None], axis=-1)) # distance matrix
     σ1 = np.median(d1).item()
     σ = np.reshape([σ1, σ2], (2,1,1))

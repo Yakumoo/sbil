@@ -9,7 +9,8 @@ import copy
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.save_util import save_to_pkl, load_from_pkl
 from stable_baselines3.common.env_util import is_wrapped
-from stable_baselines3.common.preprocessing import get_flattened_obs_dim, preprocess_obs
+from stable_baselines3.common.utils import check_for_correct_spaces
+from stable_baselines3.common.preprocessing import get_flattened_obs_dim, preprocess_obs, get_obs_shape
 from stable_baselines3.common.buffers import (
     DictReplayBuffer,
     ReplayBuffer,
@@ -80,9 +81,17 @@ def get_demo_buffer(demo_buffer, learner):
         demo_buffer_ = load_from_pkl(demo_buffer)
     else:
         demo_buffer_ = copy.deepcopy(demo_buffer)
-    if get_flattened_obs_dim(learner.observation_space) == get_flattened_obs_dim(demo_buffer_.observation_space)+1:
+
+    env = learner.env
+    if hasattr(env, "envs"):
+        env = env.envs[0]
+
+    if is_wrapped(env, AbsorbingState) and get_flattened_obs_dim(learner.observation_space) == get_flattened_obs_dim(demo_buffer_.observation_space)+1:
         demo_buffer_ = replay_buffer_with_absorbing(demo_buffer_)
     demo_buffer_.device = learner.device
+    assert np.isfinite(demo_buffer_.observations).all().item(), "The replay buffer observation contains non-finite values."
+    assert np.isfinite(demo_buffer_.actions).all().item(), "The replay buffer actions contains non-finite values."
+    check_for_correct_spaces(learner, demo_buffer_.observation_space, demo_buffer_.action_space)
     return demo_buffer_
 
 def state_action(state: th.Tensor, action: th.Tensor, learner: BaseAlgorithm, state_only: bool = False):
@@ -98,10 +107,11 @@ def state_action(state: th.Tensor, action: th.Tensor, learner: BaseAlgorithm, st
 
 def all_state_action(buffer: RolloutBuffer, learner: BaseAlgorithm, state_only: bool = False):
     """ Equivalent of state_action on the whole RolloutBuffer."""
-    t = lambda x: buffer.to_torch(x).view(buffer.buffer_size*buffer.n_envs, -1)
+    o_shape = get_obs_shape(learner.observation_space)
+    t = lambda x, shape=[-1]: buffer.to_torch(x).view(buffer.buffer_size*buffer.n_envs, *shape)
     if isinstance(buffer.observations, dict):
-        observations = {k: t(v) for (k, v) in buffer.observations.items()} # OrderedDict?
+        observations = {k: t(v, o_shape[k]) for k, v in buffer.observations.items()} # OrderedDict?
     else:
-        observations = t(buffer.observations)
+        observations = t(buffer.observations, o_shape)
     actions = t(buffer.actions)
     return state_action(observations, actions, learner, state_only)

@@ -14,6 +14,7 @@ from stable_baselines3.common.type_aliases import (
     RolloutBufferSamples,
 )
 from stable_baselines3.common.torch_layers import create_mlp
+from stable_baselines3.common.preprocessing import get_obs_shape
 
 from sbil.demo.utils import get_demo_buffer, state_action, all_state_action
 from sbil.utils import set_method, MLP, set_restore, save, get_policy, get_features_extractor, scale_action
@@ -131,14 +132,15 @@ def red(
     if reward_scale is None and not hasattr(learner, "reward_scale"):
         normalize = learner._vec_normalize_env.normalize_obs if learner._vec_normalize_env is not None else lambda x: x
         t = lambda x: th.as_tensor(x).to(learner.device)
+        o_shape = get_obs_shape(learner.observation_space)
         if isinstance(demo_buffer.observations, dict):
-            get_obs = lambda obs: {key: t(o) for key, o in normalize(obs).items()}
+            get_obs = lambda obs: {key: t(o).view(1, *o_shape[key]) for key, o in normalize(obs).items()}
         else:
-            get_obs = lambda obs: t(normalize(obs))
+            get_obs = lambda obs: t(normalize(np.array(obs).reshape(1, *o_shape)))
         sa = tuple(
             state_action(
-                get_obs(np.array(learner.observation_space.sample()).reshape(1,-1)),
-                t(scale_action(np.array(learner.action_space.sample()), learner.action_space).reshape(1,-1)),
+                get_obs(learner.observation_space.sample()),
+                t(scale_action(np.array(learner.action_space.sample()), learner.action_space)).view(1, -1),
                 learner, state_only
             ) for i in range(1000) # sample 1000 times
         )

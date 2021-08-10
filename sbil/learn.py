@@ -86,14 +86,13 @@ def main():
     if tensorboard_log is not None and SummaryWriter is None:
         raise ImportError("Trying to log data to tensorboard but tensorboard is not installed.")
 
-    if tensorboard_log is not None and SummaryWriter is not None and learner._custom_logger is None:
+    if tensorboard_log is not None and SummaryWriter is not None and not learner._custom_logger:
         latest_run_id = get_latest_run_id(tensorboard_log, tb_log_name)
         if not (config_learn.get('reset_num_timesteps', None) or True):
             # Continue training in the same directory
             latest_run_id -= 1
         save_path = tensorboard_log + f"/{tb_log_name}_{latest_run_id + 1}"
         learner.set_logger(configure(folder=save_path, format_strings=['csv', 'tensorboard']))
-
 
     if config_learn is not None and ok(config_learn):
         # callback

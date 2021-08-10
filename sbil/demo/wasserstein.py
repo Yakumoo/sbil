@@ -5,7 +5,7 @@ from stable_baselines3.common.buffers import (
     DictReplayBuffer, ReplayBuffer, RolloutBuffer, DictRolloutBuffer
 )
 from stable_baselines3.her.her_replay_buffer import get_time_limit
-from stable_baselines3.common.preprocessing import get_action_dim, preprocess_obs
+from stable_baselines3.common.preprocessing import get_action_dim, preprocess_obs, get_obs_shape
 
 from sbil.demo.utils import get_demo_buffer, state_action, all_state_action
 from sbil.utils import set_method, MLP, set_restore, save, _excluded_save_params, get_features_extractor
@@ -70,10 +70,11 @@ def _store_transition(
         self._last_original_obs, new_obs_, reward_ = self._last_obs, new_obs, reward
 
     # get state-action pair
-    t = lambda x: self.replay_buffer.to_torch(x)
+    t = self.replay_buffer.to_torch
     obs = self._last_original_obs
     obs = {k: t(v) for k,v in obs.items()} if isinstance(obs, dict) else t(obs)
-    sa = state_action(obs, t(buffer_action), self, state_only).cpu().numpy()
+    with th.no_grad():
+        sa = state_action(obs, t(buffer_action), self, state_only).cpu().numpy()
     sa = scaler.transform(sa)[0] # standardized state-action
 
     # upper bound wasserstein distance greedy coupling
@@ -102,7 +103,7 @@ def _store_transition(
     self.pool_w = np.delete(self.pool_w, to_delete, axis=0)
 
     reward_ = self.α * np.exp(-self.σ * cost)
-    self.n += 1#; print(self.n, len(self.pool_w), i)
+    self.n += 1
     if done: # re-initialize back to the original
         self.pool_sa = np.array(demo_sa)
         s = len(self.pool_sa)
@@ -158,6 +159,7 @@ def pwil(
     :param α,β: reward scaler hyperparameters
     :return leaner: Decorated learner
     """
+
     assert learner.env.num_envs == 1, "pwil only support a single environment."
     T = get_time_limit(learner.env, None) # get time limit or raise
 
@@ -167,13 +169,16 @@ def pwil(
 
     # get state-action pair from the demo_buffer
     s = demo_buffer.size()
-    t = lambda x: demo_buffer.to_torch(x).view(s*demo_buffer.n_envs, -1)
+    t = lambda x, shape=[-1]: demo_buffer.to_torch(x).view(s*demo_buffer.n_envs, *shape)
     demo_obs = demo_buffer.observations
+    o_shape = get_obs_shape(learner.observation_space)
     if isinstance(demo_obs, dict):
-        demo_obs = {k:t(v[:s]) for k, v in demo_obs.items()}
+        demo_obs = {k:t(v[:s], shape=o_shape[k]) for k, v in demo_obs.items()}
     else:
-        demo_obs = t(demo_obs[:s])
-    demo_sa = state_action(demo_obs, t(demo_buffer.actions[:s]), learner, state_only).cpu().numpy()
+        demo_obs = t(demo_obs[:s], shape=o_shape)
+
+    with th.no_grad():
+        demo_sa = state_action(demo_obs, t(demo_buffer.actions[:s]), learner, state_only).cpu().numpy()
 
     scaler = StandardScaler()
     demo_sa = scaler.fit_transform(demo_sa) # stadardize
@@ -188,7 +193,7 @@ def pwil(
         σ += get_action_dim(learner.action_space)
     σ = β * T / np.sqrt(σ)
     learner.σ = σ.item()
-    learner.n = 0
+    learner.n = 0 # counter
 
     set_method(
         learner,

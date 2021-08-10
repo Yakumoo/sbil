@@ -23,17 +23,22 @@ def sample(self, batch_size, env, *args, super_, demo_buffer, policy_reward=None
     if policy_reward is not None:
         replay_data.rewards[:] = policy_reward
 
-    data = (
-        (replay_data.actions, demo_sample.actions),
-        (replay_data.next_observations, demo_sample.next_observations),
-        (replay_data.dones, demo_sample.dones),
-        (replay_data.rewards, demo_sample.rewards),
-    )
     if isinstance(replay_data.observations, dict):
-        observations = {key:th.cat((obs, demo_sample.observations[key]), dim=0) for key, obs in replay_data.observations.items()}
-        return DictReplayBufferSamples(observations, *tuple(map(th.cat, data)))
+        return DictReplayBufferSamples(
+            {k: th.cat((v, demo_sample.observations[k]), dim=0) for k, v in replay_data.observations.items()},
+            th.cat((replay_data.actions,        demo_sample.actions)),
+            {k: th.cat((v, demo_sample.next_observations[k]), dim=0) for k, v in replay_data.next_observations.items()},
+            th.cat((replay_data.dones,          demo_sample.dones)),
+            th.cat((replay_data.rewards,        demo_sample.rewards)),
+        )
     else:
-        data = ((replay_data.observations, demo_sample.observations),) + data
+        data = (
+            (replay_data.observations,          demo_sample.observations),
+            (replay_data.actions,               demo_sample.actions),
+            (replay_data.next_observations,     demo_sample.next_observations),
+            (replay_data.dones,                 demo_sample.dones),
+            (replay_data.rewards,               demo_sample.rewards),
+        )
         return ReplayBufferSamples(*tuple(map(th.cat, data)))
 
 def double_buffer( # SQIL
@@ -45,19 +50,19 @@ def double_buffer( # SQIL
 ) -> OffPolicyAlgorithm:
     """
     Double buffer decorator
-    Half of sample is from the replay_buffer (dynamic)
-    Other half if from the demo_buffer (fixed) during sampling
+    Sample is from the replay_buffer (dynamic) and from the demo_buffer (fixed) during sampling
 
     :param learner: stable baselines learner object
     :param demo_buffer: demonstration replay buffer
-    :demo_reward: set the reward of the demonstration to a constant
-    :policy_reward: set the reward of the policy to a constant
+    :param demo_reward: set the reward of the demonstration to a constant
+    :param policy_reward: set the reward of the policy to a constant
         if demo_reward=1 and policy_reward=0, this is SQIL with λ=1.
         https://arxiv.org/abs/1905.11108
         Default is unchanged (rewards of the environment).
-    :return leaner: decorated learner
+    :param demo_rate: The rate of demo samples during sampling.
+    :return learner: decorated learner
     """
-    assert 0 < demo_rate < 1, "demo_rate must be in [0, 1]."
+    assert 0 < demo_rate < 1, "demo_rate must be in ]0, 1[."
     demo_buffer = get_demo_buffer(demo_buffer, learner)
     if demo_reward is not None:
         demo_buffer.rewards[:] = demo_reward

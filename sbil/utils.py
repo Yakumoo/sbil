@@ -60,7 +60,7 @@ from stable_baselines3.common.logger import Logger, CSVOutputFormat, configure, 
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.policies import BasePolicy
 from stable_baselines3.common.type_aliases import GymEnv
-from stable_baselines3.common.utils import polyak_update
+from stable_baselines3.common.utils import polyak_update, get_device
 from stable_baselines3 import SAC, TD3, DQN
 
 try:
@@ -145,7 +145,12 @@ class MLP(th.nn.Module):
     ) -> None:
         super(MLP, self).__init__()
 
+        self.input_dim = input_dim
+        self.output_dim = output_dim
         self.net_arch = net_arch
+        self.output_transform = output_transform
+        self.optimizer_data = optimizer.copy()
+        self.spectral_norm = spectral_norm
         self.output_transform = output_transform
         ot = output_transform
         distributions = {
@@ -196,6 +201,40 @@ class MLP(th.nn.Module):
         else:
             kwargs = dict(action_logits=out)
         self.distribution.actions_from_params(**kwargs, deterministic=deterministic)
+
+    def save(self, path: str) -> None:
+        """
+        Save model to a given location.
+        :param path:
+        """
+        th.save(
+            {
+                "state_dict": self.state_dict(),
+                "data": {
+                    "input_dim": self.input_dim,
+                    "output_dim": self.output_dim,
+                    "net_arch": self.net_arch,
+                    "output_transform": self.output_transform,
+                    "spectral_norm": self.spectral_norm,
+                    "optimizer": self.optimizer_data,
+                }
+            },
+            path
+        )
+
+    @classmethod
+    def load(cls, path: str, device: Union[th.device, str] = "auto") -> "MLP":
+        """
+        Load model from path.
+        :param path:
+        :param device: Device on which the network should be loaded.
+        :return:
+        """
+        device = get_device(device)
+        saved_variables = th.load(path, map_location=device)
+        model = cls(**saved_variables["data"])  # pytype: disable=not-instantiable
+        model.load_state_dict(saved_variables["state_dict"])
+        return model.to(device)
 
 class EvalSaveGif(EvalCallback):
     """
@@ -544,7 +583,7 @@ def action_loss(policy: BasePolicy, observations: th.Tensor, actions: th.Tensor)
         policy(observations)
         loss = -policy.action_dist.log_prob(actions)
     elif hasattr(policy, "mu"): # TD3
-        loss = F.mse_loss(input=policy(observations), target=actions, reduction='none')
+        loss = F.mse_loss(input=policy(observations), target=actions, reduction='none').mean(-1)
     # Q value policy
     elif q_net is not None: # DQN, QRDQN
         input = q_net(observations)
