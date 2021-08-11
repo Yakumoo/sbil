@@ -33,9 +33,17 @@ def scale_action(action: np.ndarray, space) -> np.ndarray:
     low, high = space.low, space.high
     return 2.0 * ((action - low) / (high - low)) - 1.0
 
+def unscale_action(scaled_action: np.ndarray, space) -> np.ndarray:
+    if not isinstance(space, gym.spaces.Box): return scaled_action
+    low, high = space.low, space.high
+    return low + (0.5 * (scaled_action + 1.0) * (high - low))
+
 def generate_demo(env, policy=None, noise=0, buffer_size=100000, device='cpu', optimize_memory_usage=False):
     """
     Return a ReplayBufer filled with demonstrations.
+
+    :param policy: The policy supposing ouputing an unscaled action in [low, high]
+        e.g. learner.predict or policy.predict
     """
     if isinstance(env, str):
         env = gym.make(env)
@@ -191,12 +199,12 @@ def generate_demo(env, policy=None, noise=0, buffer_size=100000, device='cpu', o
             obs = env.reset()
             done = False
             while not done:
-                action = policy(obs)
+                action = policy(obs) # unscaled
                 next_obs, reward, done, info = env_.step(action)
                 demo_buffer.add(
                     obs=obs,
                     next_obs=next_obs,
-                    action=scale_action(action, env_.action_space),
+                    action=scale_action(action, env_.action_space), # scaled to [-1,1]
                     reward=reward,
                     done=done,
                     infos=[info],

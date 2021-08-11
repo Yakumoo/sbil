@@ -54,10 +54,10 @@ def actor_loss_(self, data, λ, mix):
     else:
         raise NotImplementedError(f"Actor_loss_ not implemented for {self}.")
 
-    advantage = target - current
+    advantage = (target - current).detach() # no gradient, this is just a weigth
     loss = action_loss(get_policy(self), obs, act)
     if mix:
-        α = (advantage > 0).float() if λ is None else torch.sigmoid(advantage/λ)
+        α = (advantage > 0).float() if λ is None else th.sigmoid(advantage/λ)
         loss = α*loss - (1-α)*current # mix both loss, minus sign is critic maximization
     else: # regression loss only
         loss *= (advantage > 0) if λ is None else F.relu(advantage)/λ # weight or mask
@@ -76,14 +76,14 @@ def actor_loss_(self, data, λ, mix):
 def awac(
     learner: OffPolicyAlgorithm,
     demo_buffer: Union[DictReplayBuffer, ReplayBuffer, str, Path],
-    λ = 0.1,
+    λ = 1,
     mix: bool = False,
     demo_rate: Optional[float] = None,
 ) -> OffPolicyAlgorithm:
     """
     Advantage weighted actor critic: https://arxiv.org/abs/2006.09359v6
     The actor loss is changed in actor_loss and the learner loads the replay buffer with load_replay_buffer.
-    Softplus is used instead of exponential to avoid exploding weight.
+    Relu is used instead of exponential to avoid exploding weight.
 
     :param λ: Loss scaler. If set to None, hard weight (0 or 1) is used
     :param mix: Mix regression loss and critic maximization loss
