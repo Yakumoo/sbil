@@ -21,7 +21,7 @@ from stable_baselines3.common.type_aliases import (
 try:
     from sb3_contrib import TQC, QRDQN
 except ImportError:
-    TQC, QRDN = None, None
+    TQC, QRDQN = None, None
 
 from sbil.demo.buffer import double_buffer
 from sbil.demo.utils import get_demo_buffer, state_action, all_state_action
@@ -90,6 +90,7 @@ def awac(
     :param demo_rate: Proportion of demo samples during sampling
         Useful if you gave an expert policy in the demo_buffer.
         If you provide a random policy for exploration, consider not using it.
+    :return learner: Decorated learner
     """
     is_dqn = hasattr(learner, "q_net") or hasattr(learner, "quantile_net")
     assert not (is_dqn and mix), "You can not use mix and a DQN like learner."

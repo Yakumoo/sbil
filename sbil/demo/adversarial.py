@@ -117,7 +117,7 @@ def adversarial(
         https://arxiv.org/abs/1911.00459
     :param load: Zip file containing state_dict of the discriminator to resume a training.
         It should be the same as the path used with .load(path)
-    :return leaner: Decorated learner
+    :return learner: Decorated learner
     """
     demo_buffer = get_demo_buffer(demo_buffer, learner)
     is_off = isinstance(learner, OffPolicyAlgorithm)

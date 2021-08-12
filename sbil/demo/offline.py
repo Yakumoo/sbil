@@ -35,6 +35,17 @@ def bc(
     gradient_steps: int = 1000,
     print_loss: Optional[int] = None
 ) -> Union[OnPolicyAlgorithm, OffPolicyAlgorithm]:
+    """
+    Behavioural cloning BC
+    The BC process happens here, the learner is not decorated.
+    This way, you can do a BC initialization.
+
+    :param learner: Stable baselines learner object
+    :param demo_buffer: Demonstration replay buffer
+    :param gradient_steps: Number of gradient steps
+    :param print_loss: Priod for printing the loss
+    :return learner: The learner with a BC initialized policy.
+    """
 
     demo_buffer_ = get_demo_buffer(demo_buffer, learner)
     behavioural_cloning(

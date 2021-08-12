@@ -29,7 +29,7 @@ def compute_returns_and_advantage(self, super_, demo_buffer, learner, state_only
             demo_sa = all_state_action(demo_buffer, learner, state_only).cpu().numpy()
 
         sa = all_state_action(self, learner, state_only).cpu().numpy()
-        
+
     d1 = np.square(np.linalg.norm(sa-demo_sa[:,None], axis=-1)) # distance matrix
     σ1 = np.median(d1).item()
     σ = np.reshape([σ1, σ2], (2,1,1))
@@ -54,7 +54,7 @@ def gmmil(
     :param state_only: default is the concatenation of the state-action pair
     :param max_size: Subsample a batch of size max_size from demo_buffer to save memory
         Default uses the whole buffer, high memory consumption due to pairwise distance
-    :return leaner: decorated learner
+    :return learner: decorated learner
     """
 
     demo_buffer = get_demo_buffer(demo_buffer, learner)

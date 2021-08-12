@@ -157,7 +157,7 @@ def pwil(
     :param state_only: Use state only
         default is the concatenation of the state-action pair
     :param α,β: reward scaler hyperparameters
-    :return leaner: Decorated learner
+    :return learner: Decorated learner
     """
 
     assert learner.env.num_envs == 1, "pwil only support a single environment."

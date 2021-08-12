@@ -51,6 +51,8 @@ def dril(
 
     :param n_policies: Number of policies in ensemble
     #:param q: quantile cutoff
+
+    :return learner: Decorated learner
     """
     demo_buffer_ = get_demo_buffer(demo_buffer, learner)
 

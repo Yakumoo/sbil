@@ -75,7 +75,7 @@ def red(
     :param net_arch: target_net, train_net architecture and latent space dim.
     :param load: Zip file containing state_dict of the rnd to resume a training.
         It should be the same as the path used with .load(path)
-    :return leaner: Decorated learner
+    :return learner: Decorated learner
     """
     demo_buffer = get_demo_buffer(demo_buffer, learner)
     is_off = isinstance(learner, OffPolicyAlgorithm)

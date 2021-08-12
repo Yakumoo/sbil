@@ -55,6 +55,9 @@ class AbsorbingState(gym.ObservationWrapper):
 
 
 def replay_buffer_with_absorbing(replay_buffer: ReplayBuffer) -> ReplayBuffer:
+    """
+    Modify observations to indicate absorbing states
+    """
     if isinstance(replay_buffer.observation_space, Box) and len((replay_buffer.observation_space.shape))==1:
 
         o = replay_buffer.observation_space
@@ -77,6 +80,9 @@ def replay_buffer_with_absorbing(replay_buffer: ReplayBuffer) -> ReplayBuffer:
 
 
 def get_demo_buffer(demo_buffer, learner):
+    """
+    Setup the demo_buffer
+    """
     if isinstance(demo_buffer, (str, Path)):
         demo_buffer_ = load_from_pkl(demo_buffer)
     else:
@@ -91,7 +97,7 @@ def get_demo_buffer(demo_buffer, learner):
     demo_buffer_.device = learner.device
     assert np.isfinite(demo_buffer_.observations).all().item(), "The replay buffer observation contains non-finite values."
     assert np.isfinite(demo_buffer_.actions).all().item(), "The replay buffer actions contains non-finite values."
-    check_for_correct_spaces(learner, demo_buffer_.observation_space, demo_buffer_.action_space)
+    check_for_correct_spaces(env, demo_buffer_.observation_space, demo_buffer_.action_space)
     return demo_buffer_
 
 def state_action(state: th.Tensor, action: th.Tensor, learner: BaseAlgorithm, state_only: bool = False):
