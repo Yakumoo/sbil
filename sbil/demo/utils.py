@@ -95,9 +95,16 @@ def get_demo_buffer(demo_buffer, learner):
     if is_wrapped(env, AbsorbingState) and get_flattened_obs_dim(learner.observation_space) == get_flattened_obs_dim(demo_buffer_.observation_space)+1:
         demo_buffer_ = replay_buffer_with_absorbing(demo_buffer_)
     demo_buffer_.device = learner.device
-    assert np.isfinite(demo_buffer_.observations).all().item(), "The replay buffer observation contains non-finite values."
+
+    if isinstance(demo_buffer_.observation_space, gym.spaces.Dict):
+        o = np.concatenate([v.flatten() for v in demo_buffer_.observations.values()])
+    else:
+        o = demo_buffer_.observations
+
+    assert np.isfinite(o).all().item(), "The replay buffer observation contains non-finite values."
     assert np.isfinite(demo_buffer_.actions).all().item(), "The replay buffer actions contains non-finite values."
-    check_for_correct_spaces(env, demo_buffer_.observation_space, demo_buffer_.action_space)
+    check_for_correct_spaces(learner.env, demo_buffer_.observation_space, demo_buffer_.action_space)
+
     return demo_buffer_
 
 def state_action(state: th.Tensor, action: th.Tensor, learner: BaseAlgorithm, state_only: bool = False):

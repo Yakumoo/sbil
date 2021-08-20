@@ -8,7 +8,7 @@ from stable_baselines3.her.her_replay_buffer import get_time_limit
 from stable_baselines3.common.preprocessing import get_action_dim, preprocess_obs, get_obs_shape
 
 from sbil.demo.utils import get_demo_buffer, state_action, all_state_action
-from sbil.utils import set_method, MLP, set_restore, save, _excluded_save_params, get_features_extractor
+from sbil.utils import set_method, MLP, set_restore, _excluded_save_params, get_features_extractor
 import sbil
 
 from typing import Any, Dict, List, Optional, Tuple, Type, Union

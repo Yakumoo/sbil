@@ -18,7 +18,7 @@ from stable_baselines3.common.type_aliases import (
 )
 from sbil.demo.offline import behavioural_cloning
 from sbil.demo.utils import get_demo_buffer, state_action, all_state_action
-from sbil.utils import set_method, set_restore, save, get_policy, action_loss, train_off
+from sbil.utils import set_method, set_restore, get_policy, action_loss, train_off
 
 
 def actor_loss(self, data, Π, demo_buffer):

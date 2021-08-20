@@ -25,7 +25,7 @@ except ImportError:
 
 from sbil.demo.buffer import double_buffer
 from sbil.demo.utils import get_demo_buffer, state_action, all_state_action
-from sbil.utils import set_method, MLP, set_restore, save, get_policy, action_loss, train_off, actor_loss, optimize_actor, optimize_critic
+from sbil.utils import set_method, MLP, set_restore, get_policy, action_loss, train_off, actor_loss, optimize_actor, optimize_critic
 
 
 def actor_loss_(self, data, λ, mix):

@@ -11,7 +11,7 @@ from stable_baselines3.common.type_aliases import (
     RolloutBufferSamples,
 )
 from sbil.demo.utils import get_demo_buffer, state_action, all_state_action
-from sbil.utils import set_method, MLP, set_restore, save, get_policy, get_features_extractor
+from sbil.utils import set_method, MLP, set_restore, save_torch, get_policy, get_features_extractor, load_torch
 import sbil
 
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
@@ -144,8 +144,8 @@ def adversarial(
     ).to(learner.device)
     modules = {'discriminator': discriminator, 'discriminator_optimizer': discriminator.optimizer}
     if load is not None:
-        load(path, modules=modules)
-    set_method(learner, old="save", new=partial(save, modules=modules))
+        load_torch(load, modules=modules)
+    set_method(learner, old="save", new=partial(save_torch, modules=modules))
 
     # modify train() to train the discriminator
     set_method(

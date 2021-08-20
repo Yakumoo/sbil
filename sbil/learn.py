@@ -94,6 +94,9 @@ def main():
         save_path = tensorboard_log + f"/{tb_log_name}_{latest_run_id + 1}"
         learner.set_logger(configure(folder=save_path, format_strings=['csv', 'tensorboard']))
 
+    # add monitor for evaluation
+    config_env['monitor'] = config_env.get('monitor', {'filename': tensorboard_log+'monitor.csv'} if tensorboard_log else {})
+
     if config_learn is not None and ok(config_learn):
         # callback
         if config_learn.get('callback', None) is not None:
@@ -109,13 +112,13 @@ def main():
             # add env if needed
             callback_param = signature(callback_class).parameters
             if 'eval_env' in callback_param:
-                callback_dict['eval_env'] = env
+                callback_dict['eval_env'] = make_env(config_env)
 
             callback = [CopyConfigCallback(config_path), callback_class(**callback_dict)]
 
-        elif tensorboard_log is not None:
-            callback = CopyConfigCallback(config_path)
-        else: callback = None
+        else:
+            config_learn['eval_env'] = make_env(config_env)
+            callback = None if tensorboard_log is None else CopyConfigCallback(config_path)
 
         learner.learn(**config_learn, callback=callback)
 

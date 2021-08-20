@@ -28,7 +28,8 @@ import matplotlib.pyplot as plt
 # try to import
 try_import = {
     'seaborn': 'sns',
-    'imageio': 'imageio'
+    'imageio': 'imageio',
+    'pygifsicle': 'pygifsicle',
 }
 for k,v in try_import.items():
     if importlib.util.find_spec(k):
@@ -39,6 +40,7 @@ import stable_baselines3 as sb
 from stable_baselines3.common.torch_layers import create_mlp
 from stable_baselines3.common.policies import BaseModel, get_policy_from_name
 from stable_baselines3.common.preprocessing import get_action_dim
+from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.distributions import (
 DiagGaussianDistribution,
     SquashedDiagGaussianDistribution,
@@ -276,6 +278,9 @@ class EvalSaveGif(EvalCallback):
             fps = self.model.env.get_attr("metadata")[0].get('video.frames_per_second', 30) / self.period
             imageio.mimsave(self.dir+"/eval.gif", self.images, fps=fps)
             self.model.save(self.dir+"/last_model.zip")
+            g = globals()
+            if 'pygifsicle' in g: # optimize gif if possible
+                g['pygifsicle'].optimize(self.dir+"/eval.gif")
             return out
         return True
 
@@ -373,7 +378,7 @@ def save_replay_buffer(
     super_(path=path)
     self.replay_buffer = old_buffer
 
-def save(
+def save_torch(
     self,
     path: Union[str, Path, io.BufferedIOBase],
     super_: Callable[..., None],
@@ -391,17 +396,17 @@ def save(
             with archive.open('sbil_' + name + ".pt", mode="w") as f:
                 th.save(model.state_dict(), f)
 
-def load(path: str, modules: Dict[str, th.nn.Module]) -> None:
+def load_torch(path: str, modules: Dict[str, th.nn.Module]) -> None:
     """
     Load additional modules in the zip file.
     """
-    with ZipFile(save_path, mode="r") as archive:
-        assert set(modules.keys()) < archive.namelist(), ("Failed to load"
+    with ZipFile(path, mode="r") as archive:
+        assert {'sbil_'+k+".pt" for k in modules} < set(archive.namelist()), ("Failed to load"
             "Some modules are missing. Make sure you saved the model with sbil."
         )
         for name, model in modules.items():
             with archive.open('sbil_' + name + '.pt', mode="r") as f:
-                models.load_state_dict(th.load(f))
+                model.load_state_dict(th.load(f))
 
 def ok(x: Dict[str, Any]) -> bool:
     return x.pop('ok', True) in {True, None}
@@ -412,6 +417,13 @@ def get_class(class_name: str) -> Union[type[Any], None]:
         return reduce(getattr, class_name.split("."), sys.modules[__name__])
     except AttributeError:
         return None
+
+
+def clean_keys(x):
+    if isinstance(x, dict):
+        return {k.lower().strip(): clean_keys(v) for k, v in x.copy().items()}
+    else:
+        return x
 
 def make_config() -> Tuple[Dict[str, Any], Any]:
     parser = ArgumentParser(description='Training')
@@ -427,16 +439,17 @@ def make_config() -> Tuple[Dict[str, Any], Any]:
         config = yaml.safe_load(f)
 
     # import gym environment
-    if config['env'].get('import', None) is not None:
-        gym_import = importlib.import_module(config['env'].get('import'))
+    gym_package = config['env'].get('gym package', config['env'].get('gym_package', None))
+    if gym_package is not None:
+        gym_package = importlib.import_module(gym_package)
     else:
-        gym_import = None
+        gym_package = None
 
-    return config, args.config, gym_import
+    return clean_keys(config), args.config, gym_package
 
 def make_env(config_env: Dict[str, str]) -> GymEnv:
     config_env_ = {k.lower().strip(): v for k, v in config_env.copy().items()}
-    config_env_.pop('import', None)
+    config_env_.pop('gym package', config_env_.pop('gym_package', None))
     # gym environment wrappers
     max_steps = config_env_.pop('max_episode_steps', None)
     absorb = config_env_.pop('absorbingstate', None)
@@ -457,8 +470,12 @@ def make_env(config_env: Dict[str, str]) -> GymEnv:
         lambda env_: sbil.demo.AbsorbingState(env_): absorb,
         lambda env_: time_wrap(env_, max_episode_steps=max_steps): max_steps,
     }
+    monitor = config_env_.pop('monitor', None)
+
     def make_env_():
         env_ = gym.make(**config_env_)
+        if monitor is not None:
+            env_ = Monitor(env=env_, **monitor)
         for key, value in wrappers.items():
             if value:
                 env_ = key(env_)
@@ -504,6 +521,7 @@ def make_learner(
     for key, value in config_learner.items():
         if p[key].annotation in {float, int}:
             value = p[key].annotation(value)
+
     # Instanciate learner
     if load is None:
         learner = learner_class(**config_learner, env=env)
@@ -527,12 +545,23 @@ def make_learner(
         else:
             f = attrgetter(category + "." + config_algorithm.pop(category))
             il_algorithm = f(sbil)
-        if category == "demo": # generate demo_buffer is needed
+
+        # signature parameters of the IL algorithm
+        p = inspect.signature(il_algorithm).parameters
+
+        # generate demo_buffer if needed
+        if "demo_buffer" in p:
             demo_buffer = config_algorithm.get('demo_buffer', None)
             if demo_buffer is None:
                 config_algorithm['demo_buffer'] = generate_demo(env)
             elif isinstance(demo_buffer, dict):
                 config_algorithm['demo_buffer'] = generate_demo(env, **demo_buffer)
+
+        # additinal loading for the IL algorithm
+        load = config_algorithm.get('load', load)
+        if "load" in p and load is not None:
+            config_algorithm['load'] = load
+
         learner = il_algorithm(learner, **config_algorithm)
         config_algorithm['algo'] = il_algorithm.__name__
 
@@ -615,7 +644,7 @@ def unscale_action(scaled_action: np.ndarray, space) -> np.ndarray:
     low, high = space.low, space.high
     return low + (0.5 * (scaled_action + 1.0) * (high - low))
 
-def add_metric(x, y=None) -> None:
+def add_metric(x: Dict[str, List[float]], y: Dict[str, float] = None) -> None:
     if y is None: return
     for k, v in y.items():
         x[k] = (x[k] + [v]) if k in x else [v]

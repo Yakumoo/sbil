@@ -29,18 +29,18 @@ from sbil.utils import set_method, set_restore, train_off
 class RCESamples(NamedTuple):
     observations: Union[Dict[str, th.Tensor], th.Tensor]
     actions: th.Tensor
-    next_observations: th.Tensor
+    next_observations: Union[Dict[str, th.Tensor], th.Tensor]
     dones: th.Tensor
     n_step: th.Tensor
-    futur_obs: th.Tensor
-    demo_obs: th.Tensor
+    futur_obs: Union[Dict[str, th.Tensor], th.Tensor]
+    demo_obs: Union[Dict[str, th.Tensor], th.Tensor]
     demo_act: th.Tensor
 
-def critic_loss(self, data, use_current_policy):
+def critic_loss(self, data, use_behaviour_policy):
     r = data['replay']
     # get actions
     if hasattr(self.actor, "action_log_prob"): # stochastic policy
-        demo_act = self.actor.action_log_prob(r.demo_obs)[0] if use_current_policy else r.demo_act
+        demo_act = self.actor.action_log_prob(r.demo_obs)[0] if use_behaviour_policy else r.demo_act
         next_actions, next_log_prob = self.actor.action_log_prob(r.next_observations)
         futur_actions, futur_log_prob = self.actor.action_log_prob(r.futur_obs)
     else: # determinitic policy
@@ -49,12 +49,15 @@ def critic_loss(self, data, use_current_policy):
             noise = act.clone().data.normal_(0, self.target_policy_noise)
             noise = noise.clamp(-self.target_noise_clip, self.target_noise_clip)
             return (act + noise).clamp(-1, 1)
-        demo_act = get_action(r.demo_obs) if use_current_policy else r.demo_act
+        demo_act = get_action(r.demo_obs) if use_behaviour_policy else r.demo_act
         next_actions = get_action(r.next_observations)
         futur_actions = get_action(r.futur_obs)
 
     # concatenate next and futur for efficency
-    nf_obs = th.vstack((r.next_observations, r.futur_obs))
+    if isinstance(r.observations, dict):
+        nf_obs = {k: th.cat((v, r.futur_obs[k])) for k,v in r.next_observations.items()}
+    else:
+        nf_obs = th.vstack((r.next_observations, r.futur_obs))
     nf_act = th.vstack((next_actions, futur_actions))
     nf_dones = th.cat((r.dones, r.dones))
     nf_q = self.critic_target(nf_obs, nf_act)
@@ -71,12 +74,12 @@ def critic_loss(self, data, use_current_policy):
             # The prediction is the mean
             y = (next_γw/(next_γw+1) + futur_γw/(futur_γw+1)) / 2
 
-        current_quantiles = th.cat(self.critic(r.observations, r.actions), dim=1)
-        demo_quantiles = th.cat(self.critic(r.demo_obs, demo_act), dim=1)
+        value = th.cat(self.critic(r.observations, r.actions), dim=1)
+        demo_value = th.cat(self.critic(r.demo_obs, demo_act), dim=1)
 
         # reshape to do pairwise operations (double sum)
-        input = th.cat((demo_quantiles, current_quantiles), dim=0)
-        target = th.cat((th.ones_like(demo_quantiles), y.repeat(1,2)), dim=0)
+        input = th.cat((demo_value, value), dim=0)
+        target = th.cat((th.ones_like(demo_value), y.repeat(1,2)), dim=0)
 
     elif TQC is not None and isinstance(self, TQC):
         n_target_quantiles = self.critic.quantiles_total - self.top_quantiles_to_drop_per_net * self.critic.n_critics
@@ -120,8 +123,10 @@ def sample(self, batch_size, env, *args, demo_buffer, n_step, super_=None, **kwa
     # get next_obs
     if isinstance(self.observations, dict):
         get_obs = lambda i: self._normalize_obs({key: obs[i, 0, :] for key, obs in self.observations.items()}, env)
+        is_dict = True
     else:
         get_obs = lambda i: self._normalize_obs(self.observations[i, 0, :], env)
+        is_dict = False
 
     next_batch_inds = (batch_inds + 1) % self.buffer_size # batch indexe
 
@@ -139,7 +144,7 @@ def sample(self, batch_size, env, *args, demo_buffer, n_step, super_=None, **kwa
 
     data = (
         get_obs(batch_inds),
-        self.actions[batch_inds, 0, :],
+        self.actions[batch_inds, :] if is_dict else self.actions[batch_inds, 0, :],
         get_obs(next_batch_inds),
         self.dones[batch_inds] * (1 - self.timeouts[batch_inds]),
         n_step_,
@@ -147,30 +152,36 @@ def sample(self, batch_size, env, *args, demo_buffer, n_step, super_=None, **kwa
         demo_sample.observations,
         demo_sample.actions,
     )
+    def to_torch(x):
+        if isinstance(x, dict):
+            return {k:self.to_torch(v) for k,v in x.items()}
+        return self.to_torch(x)
 
-    return RCESamples(*tuple(map(self.to_torch, data)))
+    return RCESamples(*tuple(map(to_torch, data)))
 
 def rce(
     learner: OffPolicyAlgorithm,
     demo_buffer: Union[DictReplayBuffer, ReplayBuffer, str, Path],
     n_step=10,
-    use_current_policy: bool = False,
+    use_behaviour_policy: bool = False,
 ) -> OffPolicyAlgorithm:
     """
     Recursive classification of examples: https://arxiv.org/abs/2103.12656
+    We suppose observations are stored sequentially: o_0, o_1, o_2, ...
+    so we can access to futur observations for n_step
 
     :param learner: Stable baselines learner object
     :param demo_buffer: Demonstration replay buffer containing success examples (not trajectories).
     :param n_step: Number of futur step for the n_step return.
-    :param use_current_policy: Choose to use the current policy to estimate the action
+    :param use_behaviour_policy: Choose to use the current policy to estimate the action
         of the demonstration. Defaut to False.
-    :return leaner: Decorated learner
+    :return learner: Decorated learner
     """
     is_dqn = hasattr(learner, "q_net") or hasattr(learner, "quantile_net")
-    assert not is_dqn, "DQN like learner is not suported."
+    assert not is_dqn, "DQN like learner is not supported."
 
     demo_buffer_ = get_demo_buffer(demo_buffer, learner)
-    assert demo_buffer_.optimize_memory_usage, "optimize_memory_usage must be set to True in order to use n_step."
+    # assert demo_buffer_.optimize_memory_usage, "optimize_memory_usage must be set to True in order to use n_step."
     set_restore(learner)
 
 
@@ -178,7 +189,7 @@ def rce(
         learner,
         old="train",
         new=train_off,
-        critic_loss=partial(critic_loss, use_current_policy=use_current_policy),
+        critic_loss=partial(critic_loss, use_behaviour_policy=use_behaviour_policy),
     )
 
     set_method(

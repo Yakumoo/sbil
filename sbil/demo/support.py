@@ -17,7 +17,7 @@ from stable_baselines3.common.torch_layers import create_mlp
 from stable_baselines3.common.preprocessing import get_obs_shape
 
 from sbil.demo.utils import get_demo_buffer, state_action, all_state_action
-from sbil.utils import set_method, MLP, set_restore, save, get_policy, get_features_extractor, scale_action
+from sbil.utils import set_method, MLP, set_restore, save_torch, get_policy, get_features_extractor, scale_action, load_torch
 import sbil
 
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
@@ -36,16 +36,16 @@ def sample(self, batch_size, env, *args, super_, rnd, learner, reward_scale, sta
     replay_data = super_(batch_size=batch_size, env=env, *args, **kwargs)
     sa = state_action(replay_data.observations, replay_data.actions, learner, state_only)
     with th.no_grad():
-        rewards = rnd(sa).mean(-1).view(batch_size, self.n_envs)
-    replay_data.rewards[:] = -rewards * reward_scale
+        rewards = -rnd(sa).mean(-1).view(batch_size, self.n_envs)
+        replay_data.rewards[:] = rewards * reward_scale
     return replay_data
 
 def compute_returns_and_advantage(self, super_, rnd, learner, reward_scale, state_only: bool = False, *args, **kwargs) -> None:
     sa = all_state_action(self, learner, state_only)
     with th.no_grad():
-        rewards = rnd(sa).mean(-1).view(self.buffer_size, self.n_envs)
+        rewards = -rnd(sa).mean(-1).view(self.buffer_size, self.n_envs)
     rewards = rewards.cpu().numpy()
-    self.rewards[:] = -rewards * reward_scale
+    self.rewards[:] = rewards * reward_scale
     super_(*args, **kwargs)
 
 def forward(self, data, super_=None):
@@ -57,7 +57,7 @@ def red(
     demo_buffer: Union[DictReplayBuffer, ReplayBuffer, str, Path],
     state_only: bool = False,
     net_arch: Dict[str, Union[List[int], int]] = {'target':[64, 64], 'train':[128, 64], 'latent':64},
-    gradient_steps: int = 1000,
+    gradient_steps: int = 10000,
     reward_scale = None,
     load: Optional[str] = None,
 ) -> Union[OnPolicyAlgorithm, OffPolicyAlgorithm]:
@@ -114,8 +114,8 @@ def red(
     # saving and loading
     modules = {'rnd': rnd, 'rnd_optimizer': rnd.optimizer}
     if load is not None:
-        load(path, modules=modules)
-    set_method(learner, old="save", new=partial(save, modules=modules))
+        load_torch(load, modules=modules)
+    set_method(learner, old="save", new=partial(save_torch, modules=modules))
 
     # train rnd
     batch_size = learner.batch_size if hasattr(learner, "batch_size") else learner.n_steps*learner.env.num_envs
@@ -127,9 +127,10 @@ def red(
         loss.backward()
         rnd.optimizer.step()
     print("rnd loss", loss.item())
+    rnd = rnd.requires_grad_(requires_grad=False)
 
     # automatic reward scale
-    if reward_scale is None and not hasattr(learner, "reward_scale"):
+    if reward_scale is None and getattr(learner, "reward_scale", None) is None:
         normalize = learner._vec_normalize_env.normalize_obs if learner._vec_normalize_env is not None else lambda x: x
         t = lambda x: th.as_tensor(x).to(learner.device)
         o_shape = get_obs_shape(learner.observation_space)
@@ -148,7 +149,9 @@ def red(
         mean_error = rnd(sa).mean().item()
         reward_scale = int(100 / mean_error) # Rescale approximately to 100
         print("Reward scale:", reward_scale)
-    learner.reward_scale = reward_scale
+        learner.reward_scale = reward_scale
+    else:
+        learner.reward_scale = getattr(learner, "reward_scale", reward_scale)
 
     # overwrite set_method with additional arguments
     set_method_ = partial(
