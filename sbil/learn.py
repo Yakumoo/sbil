@@ -16,14 +16,23 @@ import sbil
 import sbil.demo
 import sbil.goal
 import stable_baselines3 as sb
-from sbil.utils import safe_eval, make_config, make_env, make_learner, ok, EvalSaveGif, get_class, get_tensorboard_path
+from sbil.utils import safe_eval, make_config, make_env, make_learner, ok, EvalSaveGif, get_class, get_tensorboard_path, clean_keys
 
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize, DummyVecEnv
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
 from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 from stable_baselines3.common.logger import configure
-from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.callbacks import (
+    BaseCallback,
+    EventCallback,
+    CallbackList,
+    CheckpointCallback,
+    ConvertCallback,
+    EvalCallback,
+    StopTrainingOnRewardThreshold,
+    StopTrainingOnMaxEpisodes,
+)
 
 # for multiprocessing, the import must be in the global scope
 config, config_path, gym_import = make_config()
@@ -85,37 +94,48 @@ def main():
     )
 
     # add monitor for evaluation
-    config_env['monitor'] = config_env.get('monitor', {'dir': save_path} if save_path else {})
+    config_env['monitor'] = config_env.get('monitor', None) or ({'dir': save_path} if save_path else {})
+
 
     if config_learn is not None and ok(config_learn):
         # callback
         if config_learn.get('callback', None) is not None:
             callback_dict = config_learn.pop('callback')
-            assert 'class' in callback_dict, "You must specify class in learn->callback."
+            callback = [CopyConfigCallback(config_path)]
 
-            callback_class_name = callback_dict.pop('class')
-            callback_class = get_class(callback_class_name)
-            if callback_class is None:
-                print("You are calling a callback that doesn't exist in learn")
-                return
+            for callback_class_name, callback_kwargs in callback_dict.items():
+                callback_class = get_class(callback_class_name)
+                assert callback_class, f"You are calling a callback {callback_class_name} that doesn't exist."
 
-            # add parameters if needed
-            callback_param = signature(callback_class).parameters
-            if 'eval_env' in callback_param:
-                callback_dict['eval_env'] = make_env(config_env)
-            if 'log_path' in callback_param:
-                callback_dict['log_path'] = save_path
-            if 'best_model_save_path' in callback_param:
-                callback_dict['best_model_save_path'] = save_path
+                # add parameters if needed
+                callback_param = signature(callback_class).parameters
+                if 'eval_env' in callback_param:
+                    callback_kwargs['eval_env'] = make_env(config_env)
+                if 'log_path' in callback_param:
+                    callback_kwargs['log_path'] = callback_kwargs.get('log_path', None) or save_path
+                if 'best_model_save_path' in callback_param:
+                    callback_kwargs['best_model_save_path'] = callback_kwargs.get('best_model_save_path', None) or save_path
 
-            callback = [CopyConfigCallback(config_path), callback_class(**callback_dict)]
+                callback.append(callback_class(**callback_kwargs))
 
         else:
             config_learn['eval_env'] = make_env(config_env)
-            config_learn['eval_log_path'] = save_path
-            callback = None if tensorboard_log is None else CopyConfigCallback(config_path)
+            config_learn['eval_log_path'] = config_learn.get('eval_log_path', None) or save_path
+            callback = None if save_path is None else CopyConfigCallback(config_path)
 
-        config_learn['eval_log_path'] = config_learn.get('eval_log_path', save_path)
+        # pretain with a behavioural cloning initialization
+        pretrain = config_learn.pop('pretrain', None)
+        if pretrain is not None:
+            demo_buffer = (None if config_algo is None else config_algo.get('demo_buffer', None)) or pretrain.get('demo_buffer', None)
+            assert demo_buffer, (
+                "The demo_buffer for the pretraining can not be deduced, please indicate demo_buffer"
+            )
+            sbil.demo.bc(
+                learner,
+                gradient_steps=int(pretrain.get('gradient_steps') if isinstance(pretrain, dict) else pretrain),
+                demo_buffer=demo_buffer,
+            )
+
         learner.learn(**config_learn, callback=callback)
 
     if config_save is not None and ok(config_save):

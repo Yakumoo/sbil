@@ -13,6 +13,7 @@ import inspect
 from zipfile import ZipFile
 from operator import attrgetter
 import shutil
+from copy import deepcopy
 
 
 import gym
@@ -79,6 +80,7 @@ except ImportError:
 
 from sbil.data.generate_demo import generate_demo
 import sbil
+import sbil.demo
 
 OnOrOff = Union[OffPolicyAlgorithm, OnPolicyAlgorithm]
 Info = Dict[str, Any]
@@ -472,16 +474,23 @@ def make_config() -> Tuple[Dict[str, Any], Any]:
     else:
         gym_package = None
 
-    return clean_keys(config), args.config, gym_package
+    return config, args.config, gym_package
+
+def wrapper_env(env, wrappers):
+    """ wrap the env with wrappers """
+    for key, value in wrappers.items():
+        if value:
+            env = key(env)
+    return env
 
 def make_env(config_env: Dict[str, str]) -> GymEnv:
     config_env_ = {k.lower().strip(): v for k, v in config_env.copy().items()}
     config_env_.pop('gym package', config_env_.pop('gym_package', None))
     # gym environment wrappers
     max_episode_steps = config_env_.pop('max_episode_steps', None)
-    absorb = config_env_.pop('absorbingstate', None)
-    normalize = config_env_.pop('normalize', None)
-    vecenv = config_env_.pop('vecenv', 'dummy')
+    absorb = config_env_.pop('AbsorbingState', config_env_.pop('absorbingstate', config_env_.pop('absorbing_state', None)))
+    normalize = config_env_.pop('normalize', config_env_.pop('Normalize', None))
+    vecenv = config_env_.pop('VecEnv', config_env_.pop('vecenv', config_env_.pop('vec_env', 'dummy')))
     n_envs = config_env_.pop('n_envs', None)
     monitor = config_env_.pop('monitor', None)
 
@@ -490,7 +499,7 @@ def make_env(config_env: Dict[str, str]) -> GymEnv:
     elif n_envs < 0:
         n_envs = os.cpu_count()
 
-    if config_env_.pop('timelimitaware', None):
+    if config_env_.pop('timelimitaware', config_env_.pop('TimeLimitAware', config_env_.pop('time_limit_aware', None))):
         time_wrap = TimeLimitAware
     else:
         time_wrap = gym.wrappers.TimeLimit
@@ -498,40 +507,38 @@ def make_env(config_env: Dict[str, str]) -> GymEnv:
     # available wrappers
     wrappers = {
         lambda env_: sbil.demo.AbsorbingState(env_): absorb,
+    }
+    vec_wrappers = {
         lambda env_: VecNormalize(env, **normalize): normalize,
     }
 
-    def wrapper_class(env_): # wrap env with wrappers
-        for key, value in wrappers.items():
-            if value:
-                env_ = key(env_)
-        return env_
-
     # function to create the env, it is important to wrap the TimeLimit before Monitor
-    def env_id():
-        if max_episode_steps:
-            return time_wrap(gym.make(**config_env_), max_episode_steps=max_episode_steps)
-        else:
-            return gym.make(**config_env_)
+    if max_episode_steps:
+        env_id = lambda: time_wrap(gym.make(**config_env_), max_episode_steps=max_episode_steps)
+    else:
+        env_id = lambda: gym.make(**config_env_)
 
     vec_env_cls = {'dummy':DummyVecEnv, 'subproc':SubprocVecEnv}[vecenv.lower()]
 
     if monitor is None: # wrap without the monitor
-        return wrapper_class(vec_env_cls([env_id for i in range(n_envs)]))
+        env = vec_env_cls([lambda: wrapper_env(env_id(), wrappers) for i in range(n_envs)])
     else:
-        return make_vec_env(
+        env = make_vec_env(
             env_id=env_id,
             n_envs=n_envs,
             seed=None,
             start_index=0,
             monitor_dir=monitor.pop('dir', None),
-            wrapper_class=wrapper_class,
+            wrapper_class=wrapper_env,
             env_kwargs=None,#config_env_,
             vec_env_cls=vec_env_cls,
             vec_env_kwargs=None,
             monitor_kwargs=monitor,
-            wrapper_kwargs=None,
+            wrapper_kwargs={'wrappers': wrappers},
         )
+
+    # final vec wrappers
+    return wrapper_env(env, vec_wrappers)
 
 
 def make_learner(
@@ -539,14 +546,17 @@ def make_learner(
     env: GymEnv,
     config_algorithm: Dict[str, str]=None
 ) -> BaseAlgorithm:
+
     learner_class_name = config_learner.pop('class')
     learner_class = None
+
     if hasattr(sb, learner_class_name):
         learner_class = getattr(sb, learner_class_name)
     elif importlib.util.find_spec("sb3_contrib"):
         import sb3_contrib
         if hasattr(sb3_contrib, learner_class_name):
             learner_class = getattr(sb3_contrib, learner_class_name)
+
     if learner_class is None:
         learner_class = get_class(learner_class_name)
         assert learner_class is not None, (
@@ -559,6 +569,8 @@ def make_learner(
         config_learner['policy'] = config_learner['class']
 
     load = config_learner.pop('load', None)
+    load_replay_buffer = config_learner.pop('load_replay_buffer', None)
+
     # convert str to float or int
     p = inspect.signature(learner_class).parameters
     for key, value in config_learner.items():
@@ -583,10 +595,12 @@ def make_learner(
             "You must choose either demo, goal, query or custom in algorithm."
         )
         category = next(iter(category))
+        algorithm = config_algorithm.pop(category)
         if category == "custom":
             il_algorithm = getattr(m, category)
         else:
-            f = attrgetter(category + "." + config_algorithm.pop(category))
+            assert algorithm is not None and hasattr(getattr(sbil, category), algorithm), f"The algorithm you gave is incorrect {category}: {algorithm}"
+            f = attrgetter(category + "." + algorithm)
             il_algorithm = f(sbil)
 
         # signature parameters of the IL algorithm
@@ -594,10 +608,8 @@ def make_learner(
 
         # generate demo_buffer if needed
         if "demo_buffer" in p:
-            demo_buffer = config_algorithm.get('demo_buffer', None)
-            if demo_buffer is None:
-                config_algorithm['demo_buffer'] = generate_demo(env)
-            elif isinstance(demo_buffer, dict):
+            demo_buffer = config_algorithm.get('demo_buffer', None) or {}
+            if isinstance(demo_buffer, dict):
                 config_algorithm['demo_buffer'] = generate_demo(env, **demo_buffer)
 
         # additinal loading for the IL algorithm
@@ -607,6 +619,20 @@ def make_learner(
 
         learner = il_algorithm(learner, **config_algorithm)
         config_algorithm['algo'] = il_algorithm.__name__
+
+    # load_replay_buffer
+    if load_replay_buffer is not None:
+        if load_replay_buffer is True:
+            demo_buffer = config_algorithm.get('demo_buffer', None)
+            assert config_algorithm is not None and demo_buffer, (
+                "The replay buffer can not be deduced during load_replay_buffer, please indicate a path."
+            )
+            if isinstance(demo_buffer, str):
+                learner.load_replay_buffer(demo_buffer)
+            else:
+                learner.replay_buffer = deepcopy(demo_buffer)
+        else:
+            learner.load_replay_buffer(load_replay_buffer)
 
     return learner
 
