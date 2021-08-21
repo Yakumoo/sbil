@@ -12,21 +12,16 @@ import ast
 from operator import attrgetter
 import shutil
 
-try:
-    from torch.utils.tensorboard import SummaryWriter
-except ImportError:
-    SummaryWriter = None
-
 import sbil
 import sbil.demo
 import sbil.goal
 import stable_baselines3 as sb
-from sbil.utils import safe_eval, make_config, make_env, make_learner, ok, EvalSaveGif, get_class
+from sbil.utils import safe_eval, make_config, make_env, make_learner, ok, EvalSaveGif, get_class, get_tensorboard_path
+
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize, DummyVecEnv
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
 from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
-from stable_baselines3.common.utils import get_latest_run_id
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.callbacks import BaseCallback
 
@@ -67,35 +62,30 @@ def main():
         else:
             print("Evaluating declare")
             safe_eval(config_declare) # import forbidden
-    m = sys.modules[__name__]
+
+    # get tensorboard folder
+    save_path = get_tensorboard_path(
+        tensorboard_log=config_learner.get('tensorboard_log', None),
+        tb_log_name=config_learn.get('tb_log_name', None) or '',
+        reset_num_timesteps=config_learn.get('reset_num_timesteps', True),
+    )
 
     # gym environment wrappers
     env = make_env(config_env)
+
     # learner
     learner = make_learner(config_learner, env, config_algo)
+    learner.set_logger(configure(folder=save_path, format_strings=['csv', 'tensorboard']))
+    is_off = isinstance(learner, OffPolicyAlgorithm)
+
     print(
         f"Using {type(learner).__name__}" + (f" and {config_algo['algo']}"
         if config_algo and 'algo' in config_algo else "")
         +f" on {config_env['id']}"
     )
-    is_off = isinstance(learner, OffPolicyAlgorithm)
-
-    # try add csv to logger
-    tensorboard_log = config_learner.get('tensorboard_log', None)
-    tb_log_name = config_learn.get('tb_log_name', None) or ''
-    if tensorboard_log is not None and SummaryWriter is None:
-        raise ImportError("Trying to log data to tensorboard but tensorboard is not installed.")
-
-    if tensorboard_log is not None and SummaryWriter is not None:
-        latest_run_id = get_latest_run_id(tensorboard_log, tb_log_name)
-        if not config_learn.get('reset_num_timesteps', True):
-            # Continue training in the same directory
-            latest_run_id -= 1
-        save_path = tensorboard_log + f"/{tb_log_name}_{latest_run_id + 1}"
-        learner.set_logger(configure(folder=save_path, format_strings=['csv', 'tensorboard']))
 
     # add monitor for evaluation
-    config_env['monitor'] = config_env.get('monitor', {'filename': tensorboard_log+'monitor.csv'} if tensorboard_log else {})
+    config_env['monitor'] = config_env.get('monitor', {'dir': save_path} if save_path else {})
 
     if config_learn is not None and ok(config_learn):
         # callback
@@ -109,17 +99,23 @@ def main():
                 print("You are calling a callback that doesn't exist in learn")
                 return
 
-            # add env if needed
+            # add parameters if needed
             callback_param = signature(callback_class).parameters
             if 'eval_env' in callback_param:
                 callback_dict['eval_env'] = make_env(config_env)
+            if 'log_path' in callback_param:
+                callback_dict['log_path'] = save_path
+            if 'best_model_save_path' in callback_param:
+                callback_dict['best_model_save_path'] = save_path
 
             callback = [CopyConfigCallback(config_path), callback_class(**callback_dict)]
 
         else:
             config_learn['eval_env'] = make_env(config_env)
+            config_learn['eval_log_path'] = save_path
             callback = None if tensorboard_log is None else CopyConfigCallback(config_path)
 
+        config_learn['eval_log_path'] = config_learn.get('eval_log_path', save_path)
         learner.learn(**config_learn, callback=callback)
 
     if config_save is not None and ok(config_save):

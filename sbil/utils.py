@@ -25,6 +25,11 @@ import stable_baselines3 as sb
 import sklearn as sk
 import matplotlib.pyplot as plt
 
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ImportError:
+    SummaryWriter = None
+
 # try to import
 try_import = {
     'seaborn': 'sns',
@@ -62,7 +67,8 @@ from stable_baselines3.common.logger import Logger, CSVOutputFormat, configure, 
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.policies import BasePolicy
 from stable_baselines3.common.type_aliases import GymEnv
-from stable_baselines3.common.utils import polyak_update, get_device
+from stable_baselines3.common.utils import polyak_update, get_device, get_latest_run_id
+from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3 import SAC, TD3, DQN
 
 try:
@@ -247,22 +253,27 @@ class EvalSaveGif(EvalCallback):
     """
     def __init__(self,
         eval_env,
+        log_path,
+        best_model_save_path,
         *args,
         period: int = 1,
         mode='rgb_array',
-        #config_path: Optional[Dict[str, str]]= None,
         **kwargs,
     ):
-        super(EvalSaveGif, self).__init__(eval_env=eval_env, *args, **kwargs)
+        super(EvalSaveGif, self).__init__(
+            eval_env=eval_env,
+            log_path=log_path,
+            best_model_save_path=best_model_save_path,
+            *args,
+            **kwargs,
+        )
+
         self.count = 0
         self.mode = mode
         self.period = period
-        #self.config_path = config_path
 
     def _on_training_start(self): # setup the csv logger
         self.dir = self.logger.get_dir() or self.log_path
-        #if self.config_path is not None:
-        #shutil.copyfile(self.config_path, self.dir + "/config.yaml")
 
     def _log_success_callback(self, locals_, globals_) -> None:
         super()._log_success_callback(locals_, globals_)
@@ -282,7 +293,23 @@ class EvalSaveGif(EvalCallback):
             if 'pygifsicle' in g: # optimize gif if possible
                 g['pygifsicle'].optimize(self.dir+"/eval.gif")
             return out
+
         return True
+
+def get_tensorboard_path(tensorboard_log, tb_log_name: str, reset_num_timesteps=True):
+    if tensorboard_log is not None and SummaryWriter is None:
+        raise ImportError("Trying to log data to tensorboard but tensorboard is not installed.")
+
+    if tensorboard_log is not None and SummaryWriter is not None:
+        latest_run_id = get_latest_run_id(tensorboard_log, tb_log_name)
+        if not reset_num_timesteps:
+            # Continue training in the same directory
+            latest_run_id -= 1
+        save_path = tensorboard_log + f"/{tb_log_name}_{latest_run_id + 1}"
+    else:
+        save_path = None
+    return save_path
+
 
 def _excluded_save_params(
     self,
@@ -451,11 +478,13 @@ def make_env(config_env: Dict[str, str]) -> GymEnv:
     config_env_ = {k.lower().strip(): v for k, v in config_env.copy().items()}
     config_env_.pop('gym package', config_env_.pop('gym_package', None))
     # gym environment wrappers
-    max_steps = config_env_.pop('max_episode_steps', None)
+    max_episode_steps = config_env_.pop('max_episode_steps', None)
     absorb = config_env_.pop('absorbingstate', None)
     normalize = config_env_.pop('normalize', None)
-    vecenv = config_env_.pop('vecenv', None)
+    vecenv = config_env_.pop('vecenv', 'dummy')
     n_envs = config_env_.pop('n_envs', None)
+    monitor = config_env_.pop('monitor', None)
+
     if n_envs is None:
         n_envs = 1
     elif n_envs < 0:
@@ -466,30 +495,44 @@ def make_env(config_env: Dict[str, str]) -> GymEnv:
     else:
         time_wrap = gym.wrappers.TimeLimit
 
+    # available wrappers
     wrappers = {
         lambda env_: sbil.demo.AbsorbingState(env_): absorb,
-        lambda env_: time_wrap(env_, max_episode_steps=max_steps): max_steps,
+        lambda env_: VecNormalize(env, **normalize): normalize,
     }
-    monitor = config_env_.pop('monitor', None)
 
-    def make_env_():
-        env_ = gym.make(**config_env_)
-        if monitor is not None:
-            env_ = Monitor(env=env_, **monitor)
+    def wrapper_class(env_): # wrap env with wrappers
         for key, value in wrappers.items():
             if value:
                 env_ = key(env_)
         return env_
 
-    # Vectorized environment
-    if vecenv is not None:
-        vecenv_ = {'dummy':DummyVecEnv, 'subproc':SubprocVecEnv}[vecenv.lower()]
+    # function to create the env, it is important to wrap the TimeLimit before Monitor
+    def env_id():
+        if max_episode_steps:
+            return time_wrap(gym.make(**config_env_), max_episode_steps=max_episode_steps)
+        else:
+            return gym.make(**config_env_)
+
+    vec_env_cls = {'dummy':DummyVecEnv, 'subproc':SubprocVecEnv}[vecenv.lower()]
+
+    if monitor is None: # wrap without the monitor
+        return wrapper_class(vec_env_cls([env_id for i in range(n_envs)]))
     else:
-        vecenv_ = DummyVecEnv
-    env = vecenv_([make_env_ for  i in range(n_envs)])
-    if normalize is not None:
-        env = VecNormalize(env, **normalize)
-    return env
+        return make_vec_env(
+            env_id=env_id,
+            n_envs=n_envs,
+            seed=None,
+            start_index=0,
+            monitor_dir=monitor.pop('dir', None),
+            wrapper_class=wrapper_class,
+            env_kwargs=None,#config_env_,
+            vec_env_cls=vec_env_cls,
+            vec_env_kwargs=None,
+            monitor_kwargs=monitor,
+            wrapper_kwargs=None,
+        )
+
 
 def make_learner(
     config_learner:Dict[str, str],

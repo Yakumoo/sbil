@@ -57,7 +57,7 @@ def red(
     demo_buffer: Union[DictReplayBuffer, ReplayBuffer, str, Path],
     state_only: bool = False,
     net_arch: Dict[str, Union[List[int], int]] = {'target':[64, 64], 'train':[128, 64], 'latent':64},
-    gradient_steps: int = 10000,
+    gradient_steps: int = 1000,
     reward_scale = None,
     load: Optional[str] = None,
 ) -> Union[OnPolicyAlgorithm, OffPolicyAlgorithm]:
