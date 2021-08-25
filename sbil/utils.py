@@ -584,7 +584,7 @@ def make_learner(
             learner.policy = learner.policy.load(policy_load)
     else:
         print(f"Loading learner {load}.")
-        learner = learner_class.load(load, env=env)
+        learner = learner_class.load(load, env=env, device=config_learner.get('device', None) or 'auto')
         learner._last_obs = None # this will reset the environment
 
     # algorithm
