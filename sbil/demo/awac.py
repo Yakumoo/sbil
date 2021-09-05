@@ -104,7 +104,7 @@ def awac(
         learner.replay_buffer = demo_buffer_
         learner.replay_buffer.device = learner.device
     set_restore(learner)
-
+    #learner.λ = getattr(learner, "λ", λ)
 
     set_method(
         learner,

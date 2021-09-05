@@ -16,7 +16,8 @@ import sbil
 import sbil.demo
 import sbil.goal
 import stable_baselines3 as sb
-from sbil.utils import safe_eval, make_config, make_env, make_learner, ok, EvalSaveGif, get_class, get_tensorboard_path, clean_keys
+from sbil.utils import EvalSaveGif, get_tensorboard_path
+from sbil.parser import make_config, make_env, make_learner, ok, get_class, clean_keys, safe_eval
 
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize, DummyVecEnv
 from stable_baselines3.common.env_util import make_vec_env
